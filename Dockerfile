@@ -44,7 +44,7 @@ COPY --from=makemkv-build /usr/share/MakeMKV /usr/share/MakeMKV
 # whipper patch
 COPY patches/ambiguous-release.patch /tmp/ambiguous-release.patch
 
-# Runtime deps + whipper build
+# All deps in one layer: runtime + build whipper + clean up
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \
@@ -53,8 +53,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-mutagen \
         python3-pil \
         python3-ruamel.yaml \
+        python3-setuptools \
+        python3-packaging \
+        python3-libdiscid \
+        python3-cdio \
+        python3-dev \
         flac \
         libsndfile1 \
+        libsndfile1-dev \
         libdiscid0 \
         cdrdao \
         cdparanoia \
@@ -62,30 +68,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         sg3-utils \
         libavcodec59 \
         libssl3 \
-        # build deps for whipper
-        python3-dev \
-        python3-setuptools \
         gcc \
-        libdiscid-dev \
-        libsndfile1-dev \
-        swig \
         git \
         patch \
-        pkg-config \
-    && pip3 install --break-system-packages \
-        discid \
-        pycdio \
+    && pip3 install --break-system-packages discid \
     && git clone --depth 1 https://github.com/whipper-team/whipper.git /tmp/whipper \
     && cd /tmp/whipper \
     && patch -p1 < /tmp/ambiguous-release.patch \
-    && pip3 install --break-system-packages . \
+    && pip3 install --break-system-packages --no-deps . \
     && cd / \
     && rm -rf /tmp/whipper /tmp/ambiguous-release.patch \
-    # Clean up build deps
-    && apt-get purge -y python3-dev gcc swig git patch pkg-config libdiscid-dev libsndfile1-dev \
-    && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/* \
-    && ln -sf /usr/bin/cd-paranoia /usr/bin/cd-paranoia 2>/dev/null || true
+    && apt-get purge -y python3-dev gcc git patch libsndfile1-dev \
+    && apt-get autoremove --purge -y \
+    && rm -rf /var/lib/apt/lists/*
 
 # Scripts, config, and default hooks
 COPY config/whipper.conf /defaults/whipper.conf

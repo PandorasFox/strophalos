@@ -124,8 +124,10 @@ print(s)
     DRV_FLAGS=$(echo "$DRV" | cut -d',' -f4)
     DRV_LABEL=$(echo "$DRV" | cut -d',' -f6 | tr -d '"')
 
-    if [ -z "$DRV_LABEL" ]; then
-        log "scan completed but no label found, skipping"
+    # Audio CDs have flags=0 and no label — that's expected, route to whipper.
+    # Video discs with no label after a full scan are genuinely unreadable.
+    if [ -z "$DRV_LABEL" ] && [ "$DRV_FLAGS" -ne 0 ]; then
+        log "video disc scan returned no label, skipping"
         continue
     fi
 
