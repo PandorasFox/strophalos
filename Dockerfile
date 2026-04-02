@@ -78,7 +78,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && pip3 install --break-system-packages --no-deps . \
     && cd / \
     && rm -rf /tmp/whipper /tmp/ambiguous-release.patch \
-    && apt-get purge -y python3-dev gcc git patch libsndfile1-dev \
+    && ln -s /usr/bin/cdparanoia /usr/bin/cd-paranoia \
+    && apt-get purge -y python3-dev python3-pip gcc git patch libsndfile1-dev \
     && apt-get autoremove --purge -y \
     && rm -rf /var/lib/apt/lists/*
 
