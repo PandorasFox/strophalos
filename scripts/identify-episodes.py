@@ -14,6 +14,7 @@ import json
 import os
 import re
 import struct
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -53,6 +54,7 @@ class RippedFile:
 # OpenSubtitles v2 API — hash-based episode identification
 # ---------------------------------------------------------------------------
 
+NOTIFY_SCRIPT = shutil.which("notify.sh") or "/usr/local/bin/notify.sh"
 OPENSUBTITLES_CONFIG = Path("/config/opensubtitles.json")
 OPENSUBTITLES_API_BASE = "https://api.opensubtitles.com/api/v1"
 
@@ -141,6 +143,7 @@ def _opensubtitles_refresh_token(config: dict[str, Any]) -> dict[str, Any] | Non
     # credentials. If the token is expired, we cannot refresh it without the
     # user's password. Log and return None so the caller falls back gracefully.
     print("  OpenSubtitles: JWT token expired. Re-run setup-opensubtitles.sh to re-authenticate.")
+    _notify("OpenSubtitles token expired", "Run: docker exec -it strophalos setup-opensubtitles.sh", error=True)
     return None
 
 
@@ -252,6 +255,18 @@ def opensubtitles_identify(
 # ---------------------------------------------------------------------------
 
 API_BASE = "https://api.themoviedb.org/3"
+
+
+def _notify(title: str, body: str, error: bool = False) -> None:
+    """Send a notification via notify.sh (no-op if not configured)."""
+    try:
+        cmd = [NOTIFY_SCRIPT]
+        if error:
+            cmd.append("--error")
+        cmd.extend([title, body])
+        subprocess.run(cmd, capture_output=True, timeout=10)
+    except Exception:
+        pass
 
 
 def _tmdb_get(endpoint: str, params: dict[str, str] | None = None) -> dict[str, Any] | None:
@@ -1006,8 +1021,14 @@ def main() -> None:
             manifest_path = out_dir / ".episode-manifest.json"
             manifest_path.write_text(json.dumps(manifest, indent=2))
             print(f"  Manifest written: {manifest_path}")
+        ep_range = f"{list(matched.values())[0]['season']}x{list(matched.values())[0]['episode']:02d}–{list(matched.values())[-1]['season']}x{list(matched.values())[-1]['episode']:02d}" if matched else ""
         summary = f"Matched {len(matched)}/{len(mkv_files)} file(s) via OpenSubtitles hash"
         print(summary)
+        series_name = _clean_disc_label(args.label)
+        _notify(
+            f"{series_name} — {len(matched)} episodes identified",
+            f"{ep_range}\nMethod: OpenSubtitles hash\n{len(mkv_files)} title(s) ripped",
+        )
         return
 
     # If hash lookup got partial results, store them — we'll use them to
@@ -1233,6 +1254,31 @@ def main() -> None:
     if unmatched:
         summary += f", {len(unmatched)} unmatched"
     print(summary)
+
+    # Build notification with method and episode range
+    series_name = _clean_disc_label(args.label)
+    methods: set[str] = set()
+    if hash_identified:
+        methods.add("OpenSubtitles hash")
+    if use_forward_order:
+        methods.add("forward order")
+    elif any(a[2] > 0 for a in assignments):
+        methods.add("subtitle matching")
+    method_str = " + ".join(sorted(methods)) or "duration"
+
+    matched_eps = sorted(matched.values(), key=lambda m: (m.get("season", 0), m.get("episode", 0)))
+    if matched_eps:
+        first, last = matched_eps[0], matched_eps[-1]
+        ep_range = f"S{first['season']:02d}E{first['episode']:02d}–S{last['season']:02d}E{last['episode']:02d}"
+    else:
+        ep_range = ""
+
+    body = f"{ep_range}\nMethod: {method_str}\n{total_files} title(s) ripped"
+    if unmatched:
+        body += f"\n{len(unmatched)} unmatched"
+        _notify(f"{series_name} — partially identified", body, error=True)
+    elif matched:
+        _notify(f"{series_name} — {len(matched)} episodes identified", body)
 
 
 if __name__ == "__main__":

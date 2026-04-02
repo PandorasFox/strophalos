@@ -75,7 +75,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc \
         git \
         patch \
-    && pip3 install --break-system-packages discid pgsrip \
+    && pip3 install --break-system-packages discid pgsrip apprise \
     && git clone --depth 1 https://github.com/whipper-team/whipper.git /tmp/whipper \
     && cd /tmp/whipper \
     && patch -p1 < /tmp/ambiguous-release.patch \

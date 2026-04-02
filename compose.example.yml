@@ -11,6 +11,7 @@ services:
       - TMDB_API_KEY=  # optional, improves TV vs movie classification
       - OPENSUBTITLES_API_KEY=  # optional, enables hash-based episode identification
       - ASSUME_DISC_ORDER=true  # assume discs are ripped in order (disable for out-of-order ripping)
+      - NOTIFY_URL=  # apprise URL for notifications, e.g. tgram://bot_token/chat_id
       - PUID=1000
       - PGID=1000
     volumes:

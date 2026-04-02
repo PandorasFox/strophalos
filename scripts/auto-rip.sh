@@ -52,6 +52,10 @@ as_user() {
     setpriv --reuid="$PUID" --regid="$PGID" --clear-groups "$@"
 }
 
+notify() {
+    /usr/local/bin/notify.sh "$@"
+}
+
 run_hook() {
     hook="/config/hooks/$1"
     shift
@@ -145,10 +149,13 @@ print(s)
 
     if [ "$DRV_FLAGS" -eq 0 ]; then
         log "audio disc — handing off to whipper"
+        notify "Ripping CD" "$DRV_LABEL"
         as_user /usr/local/bin/rip-cd.sh
         RC=$?
+        # rip-cd.sh sends its own detailed notification with MusicBrainz info
     else
         log "video disc — running smart rip"
+        notify "Ripping disc" "$DRV_LABEL"
         RIP_OUTPUT=$(as_user python3 /usr/local/bin/rip-video.py --drive 0 --output /output 2>&1)
         RC=$?
         echo "$RIP_OUTPUT"
@@ -157,6 +164,13 @@ print(s)
         OUTPUT_DIR=$(echo "$RIP_OUTPUT" | grep '^STROPHALOS_OUTPUT_DIR=' | cut -d= -f2-)
         OUTPUT_DIR="${OUTPUT_DIR:-/output/$DRV_LABEL}"
         DISC_TYPE=$(echo "$RIP_OUTPUT" | grep '^STROPHALOS_DISC_TYPE=' | cut -d= -f2-)
+
+        if [ $RC -eq 0 ]; then
+            N_FILES=$(find "$OUTPUT_DIR" -name '*.mkv' 2>/dev/null | wc -l)
+            notify "Disc ripped" "$DRV_LABEL — $N_FILES file(s), $DISC_TYPE"
+        else
+            notify --error "Disc rip failed" "$DRV_LABEL (exit $RC)"
+        fi
 
         # Episode identification for TV discs (background — don't block next rip)
         if [ "$RC" -eq 0 ] && [ "$DISC_TYPE" = "tv" ] && [ -n "${TMDB_API_KEY:-}" ]; then

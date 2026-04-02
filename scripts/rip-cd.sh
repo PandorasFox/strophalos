@@ -20,6 +20,7 @@ done
 # Query disc info via whipper/python to get disc count from MB
 DISC_INFO=$(python3 -c "
 import discid
+import json
 import musicbrainzngs
 from whipper.common.config import Config
 
@@ -28,7 +29,6 @@ musicbrainzngs.set_useragent('rip-cd', '1.0', 'local')
 conf = Config()
 try:
     server = conf._parser.get('musicbrainz', 'server')
-    # musicbrainzngs wants just host:port, no scheme
     server = server.replace('http://', '').replace('https://', '')
     musicbrainzngs.set_hostname(server)
 except Exception:
@@ -44,14 +44,27 @@ try:
     if result.get('disc'):
         releases = result['disc']['release-list']
         if releases:
-            # pick first release to check disc count
             rel = releases[0]
             release_detail = musicbrainzngs.get_release_by_id(
-                rel['id'], includes=['media', 'discids'])['release']
+                rel['id'], includes=['media', 'discids', 'recordings'])['release']
             disc_total = len(release_detail['medium-list'])
             print('disc_total=' + str(disc_total))
             print('title=' + rel['title'])
             print('artist=' + rel.get('artist-credit-phrase', 'Unknown'))
+            print('release_id=' + rel['id'])
+
+            # Build track list for notification
+            tracks = []
+            for medium in release_detail.get('medium-list', []):
+                for track in medium.get('track-list', []):
+                    rec = track.get('recording', {})
+                    tracks.append({
+                        'num': track.get('number', '?'),
+                        'title': rec.get('title', '?'),
+                        'id': rec.get('id', ''),
+                    })
+            if tracks:
+                print('tracks_json=' + json.dumps(tracks))
         else:
             print('disc_total=1')
     else:
@@ -66,6 +79,10 @@ echo "$DISC_INFO"
 
 DISC_TOTAL=$(echo "$DISC_INFO" | grep '^disc_total=' | cut -d= -f2)
 DISC_TOTAL="${DISC_TOTAL:-1}"
+MB_TITLE=$(echo "$DISC_INFO" | grep '^title=' | cut -d= -f2-)
+MB_ARTIST=$(echo "$DISC_INFO" | grep '^artist=' | cut -d= -f2-)
+MB_RELEASE_ID=$(echo "$DISC_INFO" | grep '^release_id=' | cut -d= -f2-)
+MB_TRACKS_JSON=$(echo "$DISC_INFO" | grep '^tracks_json=' | cut -d= -f2-)
 
 if [ "$DISC_TOTAL" -gt 1 ]; then
     echo "Multi-disc release detected ($DISC_TOTAL discs), using disc number in path"
@@ -100,6 +117,42 @@ if [ "$DISC_TOTAL" -gt 1 ]; then
         done
         rmdir "$d" 2>/dev/null
     done
+fi
+
+# Notify with release + track info
+if [ $RC -eq 0 ] && [ -n "$MB_TITLE" ]; then
+    NOTIFY_BODY=$(python3 -c "
+import json, sys, os
+
+artist = sys.argv[1]
+title = sys.argv[2]
+release_id = sys.argv[3]
+tracks_json = sys.argv[4] if len(sys.argv) > 4 else ''
+
+mb_url = 'https://musicbrainz.org/release/' + release_id if release_id else ''
+lines = []
+if mb_url:
+    lines.append(f'{artist} - {title}')
+    lines.append(mb_url)
+else:
+    lines.append(f'{artist} - {title}')
+lines.append('')
+
+if tracks_json:
+    try:
+        tracks = json.loads(tracks_json)
+        for t in tracks:
+            rec_url = 'https://musicbrainz.org/recording/' + t['id'] if t.get('id') else ''
+            lines.append(f\"{t['num']}. {t['title']}\")
+    except Exception:
+        pass
+
+print('\n'.join(lines))
+" "$MB_ARTIST" "$MB_TITLE" "$MB_RELEASE_ID" "$MB_TRACKS_JSON" 2>/dev/null)
+
+    /usr/local/bin/notify.sh "CD ripped" "$NOTIFY_BODY"
+elif [ $RC -ne 0 ]; then
+    /usr/local/bin/notify.sh --error "CD rip failed" "${MB_ARTIST:-Unknown} - ${MB_TITLE:-Unknown} (exit $RC)"
 fi
 
 exit $RC
