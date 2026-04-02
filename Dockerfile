@@ -67,12 +67,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         sox \
         eject \
         sg3-utils \
+        mkvtoolnix \
+        tesseract-ocr \
+        tesseract-ocr-eng \
         libavcodec59 \
         libssl3 \
         gcc \
         git \
         patch \
-    && pip3 install --break-system-packages discid \
+    && pip3 install --break-system-packages discid pgsrip \
     && git clone --depth 1 https://github.com/whipper-team/whipper.git /tmp/whipper \
     && cd /tmp/whipper \
     && patch -p1 < /tmp/ambiguous-release.patch \

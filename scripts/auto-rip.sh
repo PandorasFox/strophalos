@@ -48,11 +48,8 @@ eject_disc() {
     eject "$DEVICE" 2>/dev/null || log "eject failed"
 }
 
-fix_permissions() {
-    dir="$1"
-    [ -d "$dir" ] || return 0
-    chown -R "$PUID:$PGID" "$dir"
-    chmod -R a=rwX "$dir"
+as_user() {
+    setpriv --reuid="$PUID" --regid="$PGID" --clear-groups "$@"
 }
 
 run_hook() {
@@ -70,6 +67,10 @@ run_hook() {
 # Ensure config dirs exist
 mkdir -p /config/hooks /config/.config/whipper /config/.MakeMKV
 ln -sf /config /config/.MakeMKV 2>/dev/null || true
+
+# Open device access for non-root rip processes and own the output dirs
+chmod 666 /dev/sr* /dev/sg* 2>/dev/null
+chown -R "$PUID:$PGID" /config /output /output-cd 2>/dev/null
 
 # Seed whipper config if missing
 if [ ! -f /config/.config/whipper/whipper.conf ] && [ -f /defaults/whipper.conf ]; then
@@ -144,21 +145,31 @@ print(s)
 
     if [ "$DRV_FLAGS" -eq 0 ]; then
         log "audio disc — handing off to whipper"
-        /usr/local/bin/rip-cd.sh
+        as_user /usr/local/bin/rip-cd.sh
         RC=$?
-        fix_permissions "/output-cd"
     else
         log "video disc — running smart rip"
-        RIP_OUTPUT=$(python3 /usr/local/bin/rip-video.py --drive 0 --output /output 2>&1)
+        RIP_OUTPUT=$(as_user python3 /usr/local/bin/rip-video.py --drive 0 --output /output 2>&1)
         RC=$?
         echo "$RIP_OUTPUT"
 
         # Extract actual output dir from rip-video.py
         OUTPUT_DIR=$(echo "$RIP_OUTPUT" | grep '^STROPHALOS_OUTPUT_DIR=' | cut -d= -f2-)
         OUTPUT_DIR="${OUTPUT_DIR:-/output/$DRV_LABEL}"
+        DISC_TYPE=$(echo "$RIP_OUTPUT" | grep '^STROPHALOS_DISC_TYPE=' | cut -d= -f2-)
+
+        # Episode identification for TV discs (background — don't block next rip)
+        if [ "$RC" -eq 0 ] && [ "$DISC_TYPE" = "tv" ] && [ -n "${TMDB_API_KEY:-}" ]; then
+            log "TV disc — starting episode identification (background)"
+            IDENTIFY_LOG="/config/logs/identify-$(date +%Y%m%d-%H%M%S).log"
+            mkdir -p /config/logs
+            as_user python3 /usr/local/bin/identify-episodes.py \
+                --dir "$OUTPUT_DIR" --label "$DRV_LABEL" \
+                >> "$IDENTIFY_LOG" 2>&1 &
+        fi
+
         STATUS=$([ $RC -eq 0 ] && echo "SUCCESS" || echo "FAILURE")
         run_hook disc_rip_terminated.sh 0 "$DRV_LABEL" "$OUTPUT_DIR" "$STATUS"
-        fix_permissions "/output"
     fi
 
     LAST_DISC="$DRV"

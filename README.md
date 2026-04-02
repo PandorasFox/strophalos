@@ -35,6 +35,13 @@ services:
       - EJECT_ON_COMPLETE=1
       # MakeMKV registration key (optional-ish, 30d evaluation period)
       - MAKEMKV_KEY=
+      # TMDb API key for title-based TV vs movie classification (optional, improves accuracy)
+      - TMDB_API_KEY=
+      # OpenSubtitles API key for hash-based episode identification (optional)
+      - OPENSUBTITLES_API_KEY=
+      # Output file ownership — UID:GID for all ripped files (default 1000:1000)
+      - PUID=1000
+      - PGID=1000
     volumes:
       # Persistent config: MakeMKV settings, whipper config, hooks
       - ./data:/config:rw
@@ -57,13 +64,33 @@ services:
 | `POLL_INTERVAL` | Seconds between disc-presence polls | `5` |
 | `EJECT_ON_COMPLETE` | Eject disc after ripping (`1` = yes, `0` = no) | `1` |
 | `MAKEMKV_KEY` | MakeMKV registration key. Written to `/config/settings.conf` on startup. Required for Blu-ray and UHD decryption. | *(none)* |
+| `TMDB_API_KEY` | [TMDb API key](https://www.themoviedb.org/settings/api) for title-based TV vs movie classification. When set, the disc label is searched on TMDb and the result biases the scoring toward the correct media type. Optional but recommended — the heuristic scoring works without it, but title search resolves ambiguous cases. | *(none)* |
+| `OPENSUBTITLES_API_KEY` | [OpenSubtitles API key](https://www.opensubtitles.com/en/consumers) for hash-based episode identification. When configured, ripped MKV files are hashed and looked up against the OpenSubtitles database before falling back to duration/subtitle matching. Requires one-time authentication — see below. | *(none)* |
+| `PUID` | UID to `chown` all output files to after ripping. | `1000` |
+| `PGID` | GID to `chown` all output files to after ripping. | `1000` |
+
+### OpenSubtitles Setup
+
+OpenSubtitles hash-based identification is the most reliable episode matching method when a match exists in the database. It uses a file hash (not content analysis) to definitively identify episodes.
+
+1. Get an API key from [OpenSubtitles](https://www.opensubtitles.com/en/consumers)
+2. Add `OPENSUBTITLES_API_KEY=your_key` to your compose environment
+3. Recreate the container, then run the one-time login:
+
+```sh
+docker exec -it strophalos setup-opensubtitles.sh
+```
+
+This prompts for your OpenSubtitles username and password and stores a JWT token in `/config/opensubtitles.json`. The token expires after 24 hours but the script can be re-run at any time.
+
+When configured, hash lookup runs as the first identification layer before duration/subtitle matching. If it identifies all files on a disc, the slower subtitle extraction is skipped entirely.
 
 ## Volumes
 
 | Mount point | Description |
 |---|---|
 | `/config` | Persistent configuration. Contains MakeMKV `settings.conf`, whipper config (`~/.config/whipper/whipper.conf`), and hook scripts (`hooks/`). Seeded with defaults on first run. |
-| `/output` | Video disc rip output. MKV files are written here, organized by disc label. The default `disc_rip_terminated` hook further sorts into `dvd/`, `bluray/`, and `uhd/` subdirectories. |
+| `/output` | Video disc rip output. MKV files are sorted into `dvd/`, `bd/`, and `uhd/` subdirectories by media type (detected via MMC profile + size heuristic), then by disc label. |
 | `/output-cd` | Audio CD rip output. FLAC files are written here by whipper, organized as `Artist - Album/Track. Title.flac`. Multi-disc releases get a `Disc N/` subdirectory. |
 
 ## Devices
@@ -97,10 +124,11 @@ Find your drive's serial with `udevadm info --query=all --name=/dev/sr0 | grep S
 
 3. **Disc type routing** -- The scan returns drive flags: `0` means audio CD, anything else means video. Audio CDs are routed to whipper; video discs go to the smart ripper.
 
-4. **Smart title classification** (video discs) -- `rip-video.py` analyzes all titles on the disc and classifies it:
-   - **Movie**: one title >= 1 hour, everything else less than half its length. Only the main feature is ripped; extras are skipped.
-   - **TV**: a cluster of 3+ titles with similar durations (within 50-200% of the median, >= 10 min each). If the longest title's duration approximately equals the sum of the cluster (within 10%), it is identified as a play-all playlist and excluded.
-   - **Fallback**: if neither pattern matches, all titles >= 2 minutes are ripped.
+4. **Smart title classification** (video discs) -- `rip-video.py` scores the disc against both movie and TV patterns simultaneously and picks the higher-scoring classification:
+   - **Movie signals**: one dominant title (high duration ratio vs second-longest), feature length (>= 1 hour), short extras, few non-trivial extras (movies typically have 0-3, not 9).
+   - **TV signals**: cluster of similar-duration titles (low coefficient of variation), episode count (more = stronger), play-all detection (longest ≈ sum of cluster), typical episode length (20-65 min).
+   - **Title search**: if `TMDB_API_KEY` is set, the disc label is searched on TMDb and the top results' media types bias the score (+0.3 to whichever type dominates).
+   - **Fallback**: if scores are tied, all titles >= 2 minutes are ripped.
 
 5. **Audio CD ripping** -- `rip-cd.sh` queries MusicBrainz via `discid` to identify the disc, detects multi-disc releases (adjusting the output path template to include `Disc N/`), and hands off to `whipper cd rip` for accurate, bit-perfect extraction to FLAC.
 
@@ -124,7 +152,7 @@ Arguments:
   $4  status       "SUCCESS" or "FAILURE"
 ```
 
-The default implementation sorts rips into `/output/dvd/`, `/output/bluray/`, or `/output/uhd/` based on the drive's MMC profile (via `sg_get_config`), using output size to distinguish UHD from standard Blu-ray (>= 50 GB = UHD).
+The default implementation is a no-op — media type sorting (`dvd/`, `bd/`, `uhd/`) is handled at rip time by `rip-video.py`. Override this hook for custom post-processing like notifications or transcoding.
 
 ### `disc_rip_skipped.sh`
 

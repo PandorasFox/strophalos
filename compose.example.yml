@@ -8,6 +8,11 @@ services:
       - POLL_INTERVAL=5
       - EJECT_ON_COMPLETE=1
       - MAKEMKV_KEY=  # your MakeMKV key here
+      - TMDB_API_KEY=  # optional, improves TV vs movie classification
+      - OPENSUBTITLES_API_KEY=  # optional, enables hash-based episode identification
+      - ASSUME_DISC_ORDER=true  # assume discs are ripped in order (disable for out-of-order ripping)
+      - PUID=1000
+      - PGID=1000
     volumes:
       - ./data:/config:rw
       - /path/to/video/rips:/output:rw
