@@ -165,9 +165,10 @@ print(s)
         OUTPUT_DIR="${OUTPUT_DIR:-/output/$DRV_LABEL}"
         DISC_TYPE=$(echo "$RIP_OUTPUT" | grep '^STROPHALOS_DISC_TYPE=' | cut -d= -f2-)
 
+        TITLE_COUNT=$(echo "$RIP_OUTPUT" | grep '^STROPHALOS_TITLE_COUNT=' | cut -d= -f2-)
+
         if [ $RC -eq 0 ]; then
-            N_FILES=$(find "$OUTPUT_DIR" -name '*.mkv' 2>/dev/null | wc -l)
-            notify "Disc ripped" "$DRV_LABEL — $N_FILES file(s), $DISC_TYPE"
+            notify "Disc ripped" "$DRV_LABEL — ${TITLE_COUNT:-?} title(s), $DISC_TYPE"
         else
             notify --error "Disc rip failed" "$DRV_LABEL (exit $RC)"
         fi

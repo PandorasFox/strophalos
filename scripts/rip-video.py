@@ -396,6 +396,7 @@ def main():
     # Print output dir on a known-format line so auto-rip.sh can capture it
     print(f"STROPHALOS_OUTPUT_DIR={out_dir}")
     print(f"STROPHALOS_DISC_TYPE={disc_type}")
+    print(f"STROPHALOS_TITLE_COUNT={len(to_rip)}")
     print("Done.")
 
 

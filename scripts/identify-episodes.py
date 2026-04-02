@@ -50,6 +50,15 @@ class RippedFile:
     subtitle_texts: list[tuple[float, str]] = field(default_factory=list)
 
 
+@dataclass
+class MatchResult:
+    """Result of identifying a single file."""
+    file: RippedFile
+    episode: Episode
+    method: str  # "opensubtitles_hash", "subtitle_match", "duration", "forward_order"
+    score: float = 0.0
+
+
 # ---------------------------------------------------------------------------
 # OpenSubtitles v2 API — hash-based episode identification
 # ---------------------------------------------------------------------------
@@ -995,56 +1004,18 @@ def main() -> None:
         return
 
     # Find MKV files
-    mkv_files = sorted(out_dir.glob("*.mkv"))
+    # Only process makemkv output files (*_tNN.mkv), not already-renamed episodes
+    mkv_files = sorted(out_dir.glob("*_t[0-9][0-9].mkv"))
     if not mkv_files:
         print("No MKV files found")
         return
 
     print(f"Found {len(mkv_files)} MKV file(s)")
 
-    # --- Layer 0: OpenSubtitles hash-based identification ---
-    # This is the most reliable method when a hash match exists in the DB.
-    # If it identifies ALL files, we can skip subtitle extraction entirely.
-    hash_results = opensubtitles_identify(mkv_files)
-    if hash_results and len(hash_results) == len(mkv_files):
-        print("  OpenSubtitles identified all files — skipping TMDb/subtitle pipeline")
-        matched = rename_from_hash_results(hash_results, args.dry_run)
-        unmatched = [p.name for p in mkv_files if p not in hash_results]
-        if not args.dry_run and matched:
-            manifest = {
-                "series": _clean_disc_label(args.label),
-                "episode_group": "OpenSubtitles hash",
-                "matched": matched,
-                "unmatched": unmatched,
-                "timestamp": datetime.now().isoformat(),
-            }
-            manifest_path = out_dir / ".episode-manifest.json"
-            manifest_path.write_text(json.dumps(manifest, indent=2))
-            print(f"  Manifest written: {manifest_path}")
-        ep_range = f"{list(matched.values())[0]['season']}x{list(matched.values())[0]['episode']:02d}–{list(matched.values())[-1]['season']}x{list(matched.values())[-1]['episode']:02d}" if matched else ""
-        summary = f"Matched {len(matched)}/{len(mkv_files)} file(s) via OpenSubtitles hash"
-        print(summary)
-        series_name = _clean_disc_label(args.label)
-        _notify(
-            f"{series_name} — {len(matched)} episodes identified",
-            f"{ep_range}\nMethod: OpenSubtitles hash\n{len(mkv_files)} title(s) ripped",
-        )
-        return
-
-    # If hash lookup got partial results, store them — we'll use them to
-    # pre-assign those files and only run the TMDb pipeline for the rest.
-    hash_identified: dict[Path, tuple[int, int, str]] = hash_results or {}
-
-    # Fetch episodes from TMDb
-    episodes, specials, group_name = fetch_all_episodes(args.label)
-    if not episodes:
-        print("No episodes found, skipping identification")
-        return
-
-    n_seasons = len({ep.season for ep in episodes})
-    print(f"  {len(episodes)} episodes across {n_seasons} season(s)")
-    if specials:
-        print(f"  {len(specials)} special(s) available for leftover matching")
+    # -----------------------------------------------------------------------
+    # Pipeline: accumulate MatchResults, rename + notify at end
+    # -----------------------------------------------------------------------
+    series_name = _clean_disc_label(args.label)
 
     # Build RippedFile objects with durations
     files: list[RippedFile] = []
@@ -1053,232 +1024,247 @@ def main() -> None:
         files.append(RippedFile(path=mkv, duration_seconds=dur))
         print(f"  {mkv.name}: {dur:.0f}s")
 
-    # Handle partial OpenSubtitles results: rename hash-identified files now
-    # and exclude them (and their matching episodes) from the scoring pipeline.
-    hash_matched: dict[str, dict[str, Any]] = {}
-    if hash_identified:
-        hash_matched = rename_from_hash_results(hash_identified, args.dry_run)
-        hash_ep_keys = {(s, e) for s, e, _ in hash_identified.values()}
-        # Remove hash-identified files from the scoring pipeline
-        files = [f for f in files if f.path not in hash_identified]
-        # Remove their episodes from candidate lists
-        episodes = [ep for ep in episodes if (ep.season, ep.episode) not in hash_ep_keys]
-        if not files:
-            print("  All remaining files identified via OpenSubtitles hash")
-            if not args.dry_run and hash_matched:
-                manifest = {
-                    "series": _clean_disc_label(args.label),
-                    "episode_group": group_name or "OpenSubtitles hash + TMDb",
-                    "matched": hash_matched,
-                    "unmatched": [],
-                    "timestamp": datetime.now().isoformat(),
-                }
-                manifest_path = out_dir / ".episode-manifest.json"
-                manifest_path.write_text(json.dumps(manifest, indent=2))
-            print(f"Matched {len(hash_matched)}/{len(mkv_files)} file(s)")
-            return
-        if not episodes:
-            print("  No remaining episodes to match against after hash identification")
-            return
-        print(f"  {len(hash_identified)} file(s) resolved via hash, {len(files)} remaining for scoring")
+    results: dict[Path, MatchResult] = {}
+    remaining = list(files)
 
-    # Duration filter: check which episodes could match each file
-    need_subs = False
-    for f in files:
-        candidates = [
-            ep for ep in episodes
-            if ep.runtime_seconds <= 0
-            or abs(f.duration_seconds - ep.runtime_seconds) / max(ep.runtime_seconds, 1) <= 0.05
-        ]
-        if len(candidates) != 1:
-            need_subs = True
-            break
+    # --- Layer 0: OpenSubtitles hash ---
+    hash_results = opensubtitles_identify(mkv_files)
+    if hash_results:
+        for path, (season, episode, title) in hash_results.items():
+            rf = next((f for f in remaining if f.path == path), None)
+            if rf:
+                ep = Episode(season=season, episode=episode, title=title, runtime_seconds=0)
+                results[path] = MatchResult(file=rf, episode=ep, method="opensubtitles hash")
+                remaining = [f for f in remaining if f.path != path]
+        print(f"  OpenSubtitles: {len(hash_results)}/{len(files)} identified via hash")
 
-    if need_subs:
-        print("  Duration-only matching insufficient, extracting subtitles...")
+    if not remaining:
+        print("  All files identified via OpenSubtitles hash")
+    else:
+        # --- Layer 1+: TMDb + duration + subtitles ---
+        episodes, specials, group_name = fetch_all_episodes(args.label)
+        if episodes:
+            n_seasons = len({ep.season for ep in episodes})
+            print(f"  {len(episodes)} episodes across {n_seasons} season(s)")
 
-        def _process_file(f: RippedFile) -> tuple[RippedFile, int]:
-            f.subtitle_texts = extract_subtitles(f.path, f.duration_seconds)
-            return f, len(f.subtitle_texts)
+            # Exclude episodes already matched by hash or already in directory
+            matched_ep_keys = {(r.episode.season, r.episode.episode) for r in results.values()}
+            existing_eps: set[tuple[int, int]] = set()
+            for existing in out_dir.glob("S[0-9][0-9]E[0-9][0-9]*.mkv"):
+                m = re.match(r"S(\d+)E(\d+)", existing.name)
+                if m:
+                    existing_eps.add((int(m.group(1)), int(m.group(2))))
+            if existing_eps:
+                print(f"  {len(existing_eps)} already-identified episode(s) in directory")
 
-        with ThreadPoolExecutor(max_workers=min(4, len(files))) as pool:
-            futures = {pool.submit(_process_file, f): f for f in files}
-            for future in as_completed(futures):
-                f, n_cues = future.result()
-                print(f"  {f.path.name}: {n_cues} subtitle cue(s)")
+            exclude = matched_ep_keys | existing_eps
+            episodes = [ep for ep in episodes if (ep.season, ep.episode) not in exclude]
 
-        # Deduplicate: remove subtitle cues that appear in multiple files
-        # (OP/ED lyrics, credits overlays are identical across episodes)
-        if len(files) > 1:
-            cue_counts: Counter[str] = Counter()
-            for f in files:
-                # Count each unique text once per file
-                seen: set[str] = set()
-                for _, text in f.subtitle_texts:
-                    normalized = text.strip().lower()
-                    if normalized not in seen:
-                        cue_counts[normalized] += 1
-                        seen.add(normalized)
-
-            # Remove cues that appear in more than half the files
-            threshold = len(files) // 2
-            common_cues = {text for text, count in cue_counts.items() if count > threshold}
-            if common_cues:
-                for f in files:
-                    before = len(f.subtitle_texts)
-                    f.subtitle_texts = [
-                        (t, text) for t, text in f.subtitle_texts
-                        if text.strip().lower() not in common_cues
+            if episodes and remaining:
+                # Duration filter
+                need_subs = False
+                for f in remaining:
+                    candidates = [
+                        ep for ep in episodes
+                        if ep.runtime_seconds <= 0
+                        or abs(f.duration_seconds - ep.runtime_seconds) / max(ep.runtime_seconds, 1) <= 0.05
                     ]
-                    after = len(f.subtitle_texts)
-                    if before != after:
-                        print(f"  {f.path.name}: {before - after} common cues removed, {after} unique")
+                    if len(candidates) != 1:
+                        need_subs = True
+                        break
 
-        if args.verbose:
-            for f in files:
-                if f.subtitle_texts:
-                    print(f"  {f.path.name} unique cues:")
-                    for t, text in f.subtitle_texts[:10]:
-                        print(f"    [{t:.1f}s] {text[:100]}")
-    else:
-        print("  Duration matching is sufficient, skipping subtitle extraction")
+                if need_subs:
+                    print("  Duration-only matching insufficient, extracting subtitles...")
+                    def _process_file(f: RippedFile) -> tuple[RippedFile, int]:
+                        f.subtitle_texts = extract_subtitles(f.path, f.duration_seconds)
+                        return f, len(f.subtitle_texts)
 
-    # Check for already-identified episodes in the output directory
-    # (from previous disc rips). These tell us where to continue from.
-    existing_eps: set[tuple[int, int]] = set()
-    for existing in out_dir.glob("S[0-9][0-9]E[0-9][0-9]*.mkv"):
-        m = re.match(r"S(\d+)E(\d+)", existing.name)
-        if m:
-            existing_eps.add((int(m.group(1)), int(m.group(2))))
+                    with ThreadPoolExecutor(max_workers=min(4, len(remaining))) as pool:
+                        futures = {pool.submit(_process_file, f): f for f in remaining}
+                        for future in as_completed(futures):
+                            f, n_cues = future.result()
+                            print(f"  {f.path.name}: {n_cues} subtitle cue(s)")
 
-    if existing_eps:
-        print(f"  Found {len(existing_eps)} already-identified episode(s) in directory")
-        # Remove already-identified episodes from candidates
-        episodes = [ep for ep in episodes if (ep.season, ep.episode) not in existing_eps]
-        if not episodes:
-            print("  All episodes already identified, nothing to do")
-            return
+                    # Deduplicate common cues (OP/ED)
+                    if len(remaining) > 1:
+                        cue_counts: Counter[str] = Counter()
+                        for f in remaining:
+                            seen: set[str] = set()
+                            for _, text in f.subtitle_texts:
+                                normalized = text.strip().lower()
+                                if normalized not in seen:
+                                    cue_counts[normalized] += 1
+                                    seen.add(normalized)
+                        threshold = len(remaining) // 2
+                        common_cues = {t for t, c in cue_counts.items() if c > threshold}
+                        if common_cues:
+                            for f in remaining:
+                                f.subtitle_texts = [
+                                    (t, text) for t, text in f.subtitle_texts
+                                    if text.strip().lower() not in common_cues
+                                ]
+                else:
+                    print("  Duration matching sufficient")
 
-    # Compute word weights for scoring
-    word_weights = compute_word_weights(episodes)
+                # Window search + assignment
+                word_weights = compute_word_weights(episodes)
+                n = len(remaining)
 
-    # Find best contiguous window
-    print("  Finding best episode window...")
-    window_start, window_score = find_best_window(files, episodes, word_weights)
-    window = episodes[window_start : window_start + len(files)]
+                print("  Finding best episode window...")
+                window_start, window_score = find_best_window(remaining, episodes, word_weights)
+                window = episodes[window_start : window_start + n]
 
-    if window:
-        print(f"  Best window: {window[0].code}–{window[-1].code} (score={window_score:.2f})")
-    else:
-        print("  Could not determine episode window")
-        return
+                if window:
+                    print(f"  Best window: {window[0].code}–{window[-1].code} (score={window_score:.2f})")
 
-    # If subtitle scoring is weak (all scores near-equal), fall back to
-    # forward ordering from the earliest available episode.
-    # This handles the common case: disc N has the next batch of episodes.
-    scores_by_window: list[float] = []
-    n = len(files)
-    for start in range(max(1, len(episodes) - n + 1)):
-        w = episodes[start : start + n]
-        if len(w) == n:
-            m = _build_score_matrix(files, w, word_weights)
-            a = hungarian_assignment(m)
-            scores_by_window.append(sum(m[i][j] for i, j, _ in a if i < n and j < n))
+                    # Check if forward-order fallback is needed
+                    use_forward = False
+                    scores_by_window: list[float] = []
+                    for start in range(max(1, len(episodes) - n + 1)):
+                        w = episodes[start : start + n]
+                        if len(w) == n:
+                            mx = _build_score_matrix(remaining, w, word_weights)
+                            a = hungarian_assignment(mx)
+                            scores_by_window.append(sum(mx[i][j] for i, j, _ in a if i < n and j < n))
 
-    use_forward_order = False
-    if scores_by_window:
-        best = max(scores_by_window)
-        second = sorted(scores_by_window, reverse=True)[1] if len(scores_by_window) > 1 else 0
-        margin = (best - second) / best if best > 0 else 0
-        if margin < 0.15 and assume_order:
-            # Scores too close — subtitle matching isn't discriminating.
-            # Prefer the earliest window (forward from where we left off).
-            window = episodes[:n]
-            print(f"  Scores indistinct (margin={margin:.0%}), using forward order: {window[0].code}–{window[-1].code}")
-            use_forward_order = True
-        elif margin < 0.15:
-            print(f"  Scores indistinct (margin={margin:.0%}), ASSUME_DISC_ORDER=false — using best-scoring window")
+                    if scores_by_window:
+                        best = max(scores_by_window)
+                        second = sorted(scores_by_window, reverse=True)[1] if len(scores_by_window) > 1 else 0
+                        margin = (best - second) / best if best > 0 else 0
+                        if margin < 0.15 and assume_order:
+                            window = episodes[:n]
+                            print(f"  Scores indistinct (margin={margin:.0%}), forward order: {window[0].code}–{window[-1].code}")
+                            use_forward = True
 
-    if use_forward_order:
-        # Direct forward assignment: t00→first ep, t01→second, etc.
-        # No min_score gating — we're committing to this ordering.
-        assignments = [(i, i, 1.0) for i in range(len(files)) if i < len(window)]
-        min_score = 0.0
-    else:
-        assignments = assign_episodes(files, window, word_weights)
-        min_score = args.min_score
+                    if use_forward:
+                        for i, f in enumerate(remaining):
+                            if i < len(window):
+                                results[f.path] = MatchResult(
+                                    file=f, episode=window[i], method="forward order",
+                                )
+                    else:
+                        assignments = assign_episodes(remaining, window, word_weights)
+                        method = "subtitle match" if need_subs else "duration"
+                        for file_idx, ep_idx, score in assignments:
+                            if score >= args.min_score:
+                                f = remaining[file_idx]
+                                results[f.path] = MatchResult(
+                                    file=f, episode=window[ep_idx],
+                                    method=method, score=score,
+                                )
 
-    # Rename
-    matched = rename_files(files, assignments, window, min_score, args.dry_run)
+    # -----------------------------------------------------------------------
+    # Rename all matched files in one pass
+    # -----------------------------------------------------------------------
+    unmatched_names: list[str] = []
+    matched_manifest: dict[str, dict[str, Any]] = {}
 
-    # Determine unmatched files
-    matched_indices = {a[0] for a in assignments if a[2] >= min_score}
-    unmatched_files = [files[i] for i in range(len(files)) if i not in matched_indices]
+    for f in files:
+        if f.path not in results:
+            unmatched_names.append(f.path.name)
+            continue
 
-    # Try matching leftovers against specials (short extras, OVAs, etc.)
-    if unmatched_files and specials:
-        print(f"  Trying {len(unmatched_files)} unmatched file(s) against specials...")
-        sp_weights = compute_word_weights(specials)
-        sp_matrix = _build_score_matrix(unmatched_files, specials, sp_weights)
-        sp_assignments = hungarian_assignment(sp_matrix)
-        sp_matched = rename_files(
-            unmatched_files, sp_assignments, specials, args.min_score, args.dry_run,
-        )
-        matched.update(sp_matched)
-        # Recalculate unmatched
-        sp_matched_indices = {a[0] for a in sp_assignments if a[2] >= args.min_score}
-        unmatched_files = [f for i, f in enumerate(unmatched_files) if i not in sp_matched_indices]
+        r = results[f.path]
+        title_safe = sanitize_filename(r.episode.title)
+        new_name = f"{r.episode.code} - {title_safe}.mkv" if title_safe else f"{r.episode.code}.mkv"
+        new_path = f.path.parent / new_name
 
-    unmatched = [f.path.name for f in unmatched_files]
-    if unmatched:
-        print(f"  Unmatched files: {unmatched}")
+        if new_path.exists() and new_path != f.path:
+            new_name = f"{r.episode.code} - {title_safe} (2).mkv"
+            new_path = f.path.parent / new_name
 
-    # Merge in any partial hash results from earlier
-    matched.update(hash_matched)
-    total_files = len(files) + len(hash_matched)
+        action = "would rename" if args.dry_run else "rename"
+        print(f"  {action}: {f.path.name} → {new_name}  [{r.method}]")
 
+        if not args.dry_run:
+            f.path.rename(new_path)
+
+        matched_manifest[new_name] = {
+            "original": f.path.name,
+            "season": r.episode.season,
+            "episode": r.episode.episode,
+            "title": r.episode.title,
+            "method": r.method,
+            "score": round(r.score, 2),
+        }
+
+    if unmatched_names:
+        print(f"  Unmatched: {unmatched_names}")
+
+    # -----------------------------------------------------------------------
     # Write manifest
-    if not args.dry_run and matched:
+    # -----------------------------------------------------------------------
+    if not args.dry_run and matched_manifest:
         manifest = {
-            "series": _clean_disc_label(args.label),
-            "episode_group": group_name,
-            "matched": matched,
-            "unmatched": unmatched,
+            "series": series_name,
+            "matched": matched_manifest,
+            "unmatched": unmatched_names,
             "timestamp": datetime.now().isoformat(),
         }
         manifest_path = out_dir / ".episode-manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
         print(f"  Manifest written: {manifest_path}")
 
-    summary = f"Matched {len(matched)}/{total_files} file(s)"
-    if unmatched:
-        summary += f", {len(unmatched)} unmatched"
-    print(summary)
+    # -----------------------------------------------------------------------
+    # Notification
+    # -----------------------------------------------------------------------
+    if not matched_manifest and not unmatched_names:
+        return
 
-    # Build notification with method and episode range
-    series_name = _clean_disc_label(args.label)
-    methods: set[str] = set()
-    if hash_identified:
-        methods.add("OpenSubtitles hash")
-    if use_forward_order:
-        methods.add("forward order")
-    elif any(a[2] > 0 for a in assignments):
-        methods.add("subtitle matching")
-    method_str = " + ".join(sorted(methods)) or "duration"
+    # Group results by method
+    by_method: dict[str, list[MatchResult]] = {}
+    for r in results.values():
+        by_method.setdefault(r.method, []).append(r)
 
-    matched_eps = sorted(matched.values(), key=lambda m: (m.get("season", 0), m.get("episode", 0)))
-    if matched_eps:
-        first, last = matched_eps[0], matched_eps[-1]
-        ep_range = f"S{first['season']:02d}E{first['episode']:02d}–S{last['season']:02d}E{last['episode']:02d}"
+    # Build episode range strings (detect contiguous runs)
+    def _format_ranges(match_results: list[MatchResult]) -> str:
+        eps = sorted((r.episode.season, r.episode.episode) for r in match_results)
+        if not eps:
+            return ""
+        ranges: list[str] = []
+        run_start = run_end = eps[0]
+        for s, e in eps[1:]:
+            prev_s, prev_e = run_end
+            if s == prev_s and e == prev_e + 1:
+                run_end = (s, e)
+            else:
+                ranges.append(
+                    f"S{run_start[0]:02d}E{run_start[1]:02d}–E{run_end[1]:02d}"
+                    if run_start[0] == run_end[0] and run_start != run_end
+                    else f"S{run_start[0]:02d}E{run_start[1]:02d}"
+                    if run_start == run_end
+                    else f"S{run_start[0]:02d}E{run_start[1]:02d}–S{run_end[0]:02d}E{run_end[1]:02d}"
+                )
+                run_start = run_end = (s, e)
+        ranges.append(
+            f"S{run_start[0]:02d}E{run_start[1]:02d}–E{run_end[1]:02d}"
+            if run_start[0] == run_end[0] and run_start != run_end
+            else f"S{run_start[0]:02d}E{run_start[1]:02d}"
+            if run_start == run_end
+            else f"S{run_start[0]:02d}E{run_start[1]:02d}–S{run_end[0]:02d}E{run_end[1]:02d}"
+        )
+        return ", ".join(ranges)
+
+    lines: list[str] = []
+    all_range = _format_ranges(list(results.values()))
+    lines.append(all_range)
+    lines.append("")
+    for method, mrs in sorted(by_method.items()):
+        r_str = _format_ranges(mrs)
+        lines.append(f"{method}: {r_str}")
+    lines.append("")
+    lines.append(f"{len(files)} title(s) ripped")
+    if unmatched_names:
+        lines.append(f"{len(unmatched_names)} unmapped file(s)")
+
+    body = "\n".join(lines)
+    title = f"{series_name}: episodes identified"
+    print(f"\n{title}\n{body}")
+
+    if unmatched_names:
+        _notify(title, body, error=True)
     else:
-        ep_range = ""
-
-    body = f"{ep_range}\nMethod: {method_str}\n{total_files} title(s) ripped"
-    if unmatched:
-        body += f"\n{len(unmatched)} unmatched"
-        _notify(f"{series_name} — partially identified", body, error=True)
-    elif matched:
-        _notify(f"{series_name} — {len(matched)} episodes identified", body)
+        _notify(title, body)
 
 
 if __name__ == "__main__":
