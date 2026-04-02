@@ -13,6 +13,8 @@ export LD_LIBRARY_PATH="/opt/makemkv/lib"
 DEVICE="${DEVICE:-/dev/sr1}"
 POLL_INTERVAL="${POLL_INTERVAL:-5}"
 EJECT_ON_COMPLETE="${EJECT_ON_COMPLETE:-1}"
+PUID="${PUID:-1000}"
+PGID="${PGID:-1000}"
 LAST_DISC=""
 DISC_WAS_PRESENT=0
 
@@ -44,6 +46,13 @@ scan_drive() {
 
 eject_disc() {
     eject "$DEVICE" 2>/dev/null || log "eject failed"
+}
+
+fix_permissions() {
+    dir="$1"
+    [ -d "$dir" ] || return 0
+    chown -R "$PUID:$PGID" "$dir"
+    chmod -R a=rwX "$dir"
 }
 
 run_hook() {
@@ -137,6 +146,7 @@ print(s)
         log "audio disc — handing off to whipper"
         /usr/local/bin/rip-cd.sh
         RC=$?
+        fix_permissions "/output-cd"
     else
         log "video disc — running smart rip"
         RIP_OUTPUT=$(python3 /usr/local/bin/rip-video.py --drive 0 --output /output 2>&1)
@@ -148,6 +158,7 @@ print(s)
         OUTPUT_DIR="${OUTPUT_DIR:-/output/$DRV_LABEL}"
         STATUS=$([ $RC -eq 0 ] && echo "SUCCESS" || echo "FAILURE")
         run_hook disc_rip_terminated.sh 0 "$DRV_LABEL" "$OUTPUT_DIR" "$STATUS"
+        fix_permissions "/output"
     fi
 
     LAST_DISC="$DRV"

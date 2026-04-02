@@ -77,7 +77,29 @@ else
     DISC_TPL='%A - %d/%A - %d'
 fi
 
-exec whipper cd -d "$DEVICE" rip \
+whipper cd -d "$DEVICE" rip \
     -O "$OUTPUT" \
     --track-template "$TRACK_TPL" \
     --disc-template "$DISC_TPL"
+RC=$?
+
+# For multi-disc releases, strip disc designations from the top-level directory
+# so all discs cluster under a single release directory.
+# e.g. "Artist - Album (Disc 1 of 2)/Disc 1/..." → "Artist - Album/Disc 1/..."
+if [ "$DISC_TOTAL" -gt 1 ]; then
+    for d in "$OUTPUT"/*/; do
+        [ -d "$d" ] || continue
+        base=$(basename "$d")
+        clean=$(echo "$base" | sed -E 's/ *\(([Dd]isc|CD) [0-9]+( of [0-9]+)?\)$//')
+        [ "$clean" = "$base" ] && continue
+        [ -z "$clean" ] && continue
+        target="$OUTPUT/$clean"
+        mkdir -p "$target"
+        for item in "$d"/*; do
+            [ -e "$item" ] && mv "$item" "$target/"
+        done
+        rmdir "$d" 2>/dev/null
+    done
+fi
+
+exit $RC
