@@ -1,0 +1,17 @@
+services:
+  strophalos:
+    build: .
+    container_name: strophalos
+    restart: unless-stopped
+    environment:
+      - DEVICE=/dev/sr1
+      - POLL_INTERVAL=5
+      - EJECT_ON_COMPLETE=1
+      - MAKEMKV_KEY=  # your MakeMKV key here
+    volumes:
+      - ./data:/config:rw
+      - /path/to/video/rips:/output:rw
+      - /path/to/cd/rips:/output-cd:rw
+    devices:
+      - /dev/sr1:/dev/sr1
+      - /dev/sg7:/dev/sg7  # SCSI generic device for UHD/BD+ decryption

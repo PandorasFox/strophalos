@@ -1,0 +1,41 @@
+diff --git a/whipper/common/mbngs.py b/whipper/common/mbngs.py
+--- a/whipper/common/mbngs.py
++++ b/whipper/common/mbngs.py
+@@ -87,6 +87,7 @@ class DiscMetadata:
+     :vartype barcode: str or None
+     """
+
++    ambiguousRelease = False
+     artist = None
+     sortName = None
+     title = None
+diff --git a/whipper/common/program.py b/whipper/common/program.py
+--- a/whipper/common/program.py
++++ b/whipper/common/program.py
+@@ -409,6 +409,9 @@ class Program:
+
+             # Select one of the returned releases. We just pick the first one.
+             ret = metadatas[0]
++
++            if len(metadatas) > 1:
++                ret.ambiguousRelease = True
+         else:
+             print('Submit this disc to MusicBrainz at the above URL.')
+             ret = None
+@@ -486,9 +489,13 @@ class Program:
+                 tags['MUSICBRAINZ_RELEASETRACKID'] = mbidTrack
+                 tags['MUSICBRAINZ_TRACKID'] = mbidRecording
+                 tags['MUSICBRAINZ_ARTISTID'] = mbidTrackArtist
+-                tags['MUSICBRAINZ_ALBUMID'] = mbidRelease
+-                tags['MUSICBRAINZ_RELEASEGROUPID'] = mbidReleaseGroup
+-                tags['MUSICBRAINZ_ALBUMARTISTID'] = mbidReleaseArtist
++                if self.metadata.ambiguousRelease:
++                    logger.info('ambiguous release: omitting release-level '
++                                'tags for track %d', number)
++                else:
++                    tags['MUSICBRAINZ_ALBUMID'] = mbidRelease
++                    tags['MUSICBRAINZ_RELEASEGROUPID'] = mbidReleaseGroup
++                    tags['MUSICBRAINZ_ALBUMARTISTID'] = mbidReleaseArtist
+                 if len(mbidWorks) > 0:
+                     tags['MUSICBRAINZ_WORKID'] = mbidWorks
+                 if len(composers) > 0:
