@@ -64,6 +64,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libdiscid0 \
         cdrdao \
         cdparanoia \
+        sox \
         eject \
         sg3-utils \
         libavcodec59 \

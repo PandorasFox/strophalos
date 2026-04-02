@@ -2,7 +2,7 @@ name: Build and push container image
 
 on:
   push:
-    branches: [main]
+    branches: [primary]
     tags: ["v*"]
 
 env:
