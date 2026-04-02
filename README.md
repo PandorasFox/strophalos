@@ -9,9 +9,12 @@ UHD blu-ray ripping requires a LibreDrive compatible drive. go check out the mak
 ## Features
 
 - **Headless** -- no GUI, no VNC, no browser. Just a polling loop and `makemkvcon`.
-- **Smart title selection** -- classifies discs as movie or TV and skips play-all playlists, menus, and junk titles automatically.
+- **Smart title selection** -- scores discs as movie or TV simultaneously and picks the higher-scoring classification. Skips play-all playlists, menus, and junk titles automatically.
+- **Automatic episode identification** -- TV disc rips are automatically renamed to `SxxExx - Episode Title.mkv` using a layered matching pipeline (OpenSubtitles hash → TMDb episode groups → duration matching → subtitle OCR). Runs asynchronously after rip — the disc ejects immediately and the next rip can start while identification runs in the background.
 - **Audio CD ripping** via [whipper](https://github.com/whipper-team/whipper) with MusicBrainz lookup, multi-disc detection, and accurate ripping.
+- **Media type sorting** -- video rips are pre-sorted into `dvd/`, `bd/`, and `uhd/` directories based on disc type detection from makemkvcon.
 - **UHD / 4K Blu-ray support** -- full `disc:0` scan for AACS2 handshake on UHD media.
+- **File ownership** -- all output files are written as `PUID:PGID` (default 1000:1000) via `setpriv`, not chowned after the fact.
 - **Lightweight polling** -- uses a raw `ioctl(CDROM_DRIVE_STATUS)` check that does not spin up the drive.
 - **Post-rip hooks** -- shell scripts in `/config/hooks/` for custom sorting, notifications, or post-processing.
 - **Auto-eject** on completion (configurable).
@@ -66,8 +69,9 @@ services:
 | `MAKEMKV_KEY` | MakeMKV registration key. Written to `/config/settings.conf` on startup. Required for Blu-ray and UHD decryption. | *(none)* |
 | `TMDB_API_KEY` | [TMDb API key](https://www.themoviedb.org/settings/api) for title-based TV vs movie classification. When set, the disc label is searched on TMDb and the result biases the scoring toward the correct media type. Optional but recommended — the heuristic scoring works without it, but title search resolves ambiguous cases. | *(none)* |
 | `OPENSUBTITLES_API_KEY` | [OpenSubtitles API key](https://www.opensubtitles.com/en/consumers) for hash-based episode identification. When configured, ripped MKV files are hashed and looked up against the OpenSubtitles database before falling back to duration/subtitle matching. Requires one-time authentication — see below. | *(none)* |
-| `PUID` | UID to `chown` all output files to after ripping. | `1000` |
-| `PGID` | GID to `chown` all output files to after ripping. | `1000` |
+| `PUID` | UID for output file ownership (rip processes run as this user via `setpriv`). | `1000` |
+| `PGID` | GID for output file ownership. | `1000` |
+| `ASSUME_DISC_ORDER` | Assume discs are ripped in sequential order (disc 1 first, then disc 2, etc.). When subtitle/duration matching can't discriminate, falls back to assigning the next batch of episodes in order. Set to `false` if ripping discs out of order. | `true` |
 
 ### OpenSubtitles Setup
 
@@ -130,11 +134,23 @@ Find your drive's serial with `udevadm info --query=all --name=/dev/sr0 | grep S
    - **Title search**: if `TMDB_API_KEY` is set, the disc label is searched on TMDb and the top results' media types bias the score (+0.3 to whichever type dominates).
    - **Fallback**: if scores are tied, all titles >= 2 minutes are ripped.
 
-5. **Audio CD ripping** -- `rip-cd.sh` queries MusicBrainz via `discid` to identify the disc, detects multi-disc releases (adjusting the output path template to include `Disc N/`), and hands off to `whipper cd rip` for accurate, bit-perfect extraction to FLAC.
+5. **Media type sorting** -- Output is pre-sorted into `dvd/`, `bd/`, or `uhd/` based on disc type from the makemkvcon scan (CINFO disc type string).
 
-6. **Post-rip hooks** -- After ripping completes, hooks in `/config/hooks/` are executed with disc metadata as arguments.
+6. **Audio CD ripping** -- `rip-cd.sh` queries MusicBrainz via `discid` to identify the disc, detects multi-disc releases (adjusting the output path template to include `Disc N/`), and hands off to `whipper cd rip` for accurate, bit-perfect extraction to FLAC. Disc designations like `(Disc 1 of 3)` are stripped from the top-level directory so multi-disc releases cluster together.
 
-7. **Eject** -- If `EJECT_ON_COMPLETE=1`, the disc is ejected and the loop resets, ready for the next disc.
+7. **Episode identification** (TV discs, background) -- After a TV disc rip completes, `identify-episodes.py` runs asynchronously to rename files to `SxxExx - Episode Title.mkv`. The disc ejects immediately; identification happens in the background while the next disc can start ripping. See below for details.
+
+8. **Post-rip hooks** -- Hooks in `/config/hooks/` are executed with disc metadata as arguments.
+
+9. **Eject** -- If `EJECT_ON_COMPLETE=1`, the disc is ejected and the loop resets, ready for the next disc.
+
+## Episode Identification
+
+TV disc rips are automatically renamed to `SxxExx - Episode Title.mkv` in the background after ripping. The disc ejects immediately — identification runs asynchronously while the next disc rips.
+
+Matching uses OpenSubtitles file hashing (most reliable, when available), TMDb episode data with DVD/BD ordering support, duration matching, and subtitle OCR via [pgsrip](https://github.com/ratoaq2/pgsrip) as fallback layers. When `ASSUME_DISC_ORDER=true` (default), sequential disc insertion is assumed — each disc picks up where the last left off.
+
+Identification logs are written to `/config/logs/identify-*.log`. A `.episode-manifest.json` is written to the output directory with match details.
 
 ## Hooks
 
