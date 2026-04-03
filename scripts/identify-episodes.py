@@ -971,6 +971,15 @@ def main() -> None:
         episodes, specials, group_name, tmdb_name = fetch_all_episodes(args.label)
         if tmdb_name:
             series_name = tmdb_name
+        if not episodes and not tmdb_name:
+            msg = f"No TMDb match for '{series_name}'. Add the series at https://www.themoviedb.org and re-run:\n"
+            msg += f"  docker exec strophalos identify-episodes.py --dir {args.dir} --label {args.label}"
+            print(f"  {msg}")
+            _notify(f"{series_name}: identification failed", msg, error=True)
+        elif not episodes:
+            msg = f"TMDb matched '{series_name}' but no episodes found. Check the TMDb entry has seasons/episodes."
+            print(f"  {msg}")
+            _notify(f"{series_name}: no episodes on TMDb", msg, error=True)
         if episodes:
             n_seasons = len({ep.season for ep in episodes})
             print(f"  {len(episodes)} episodes across {n_seasons} season(s)")

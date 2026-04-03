@@ -1,18 +1,21 @@
 # strophalos
 
-Automatic disc ripper in a headless Docker container. Insert a disc, walk away, come back to MKV files (video) or FLAC files (audio CD).
+Zero-touch disc-to-library pipeline. Insert a disc, walk away — ripped files are automatically identified via TMDb and hard-linked into a Jellyfin/Plex-ready library structure.
 
-uses makemkv (req. product key for >30d of use) for video discs and whipper for audio CDs.
+Raw rips are preserved in an immutable archive (`archive/{tv,movies}/rips/{medium}/{label}/disc{N}/`). The library (`tv/`, `movies/`) is derived via hard links — same bytes, no extra space, can be blown away and regenerated from archive at any time.
 
-UHD blu-ray ripping requires a LibreDrive compatible drive. go check out the makemkv forums :)
+**Constraint**: discs must be ripped in sequential order (disc 1 first, then disc 2, etc.) so that episodes can be packed against TMDb DVD/Blu-ray release orderings. If TMDb doesn't have an entry for your disc, you'll get a notification to go add it — the archive is safe and re-identification can be run at any time.
+
+Uses [makemkv](https://www.makemkv.com/) (product key req. for >30d) for video discs and [whipper](https://github.com/whipper-team/whipper) for audio CDs. UHD Blu-ray ripping requires a LibreDrive compatible drive — check the [makemkv forums](https://forum.makemkv.com/).
 
 ## Features
 
 - **Headless** -- no GUI, no VNC, no browser. Just a polling loop and `makemkvcon`.
 - **Smart title selection** -- scores discs as movie or TV simultaneously and picks the higher-scoring classification. Skips play-all playlists, menus, and junk titles automatically.
-- **Automatic episode identification** -- TV disc rips are automatically renamed to `SxxExx - Episode Title.mkv` using a layered matching pipeline (OpenSubtitles hash → TMDb episode groups → duration matching → subtitle OCR). Runs asynchronously after rip — the disc ejects immediately and the next rip can start while identification runs in the background.
+- **Automatic episode identification** -- TV disc rips are identified and hard-linked into the library as `SxxExx - Episode Title.mkv`. Uses OpenSubtitles hash lookup, TMDb episode groups (DVD/BD ordering), duration matching, and subtitle OCR as layered fallbacks. Runs asynchronously — the disc ejects immediately and the next rip starts while identification happens in the background.
 - **Audio CD ripping** via [whipper](https://github.com/whipper-team/whipper) with MusicBrainz lookup, multi-disc detection, and accurate ripping.
-- **Media type sorting** -- video rips are pre-sorted into `dvd/`, `bd/`, and `uhd/` directories based on disc type detection from makemkvcon.
+- **Archive/library split** -- raw rips are preserved untouched in the archive; the library is derived via hard links with canonical TMDb names. Archive can be re-identified at any time.
+- **Media type sorting** -- video rips are sorted into `dvd/`, `bd/`, and `uhd/` directories based on disc type detection.
 - **UHD / 4K Blu-ray support** -- full `disc:0` scan for AACS2 handshake on UHD media.
 - **File ownership** -- all output files are written as `PUID:PGID` (default 1000:1000) via `setpriv`, not chowned after the fact.
 - **Lightweight polling** -- uses a raw `ioctl(CDROM_DRIVE_STATUS)` check that does not spin up the drive.
@@ -93,9 +96,9 @@ When configured, hash lookup runs as the first identification layer before durat
 
 | Mount point | Description |
 |---|---|
-| `/config` | Persistent configuration. Contains MakeMKV `settings.conf`, whipper config (`~/.config/whipper/whipper.conf`), and hook scripts (`hooks/`). Seeded with defaults on first run. |
-| `/output` | Video disc rip output. MKV files are sorted into `dvd/`, `bd/`, and `uhd/` subdirectories by media type (detected via MMC profile + size heuristic), then by disc label. |
-| `/output-cd` | Audio CD rip output. FLAC files are written here by whipper, organized as `Artist - Album/Track. Title.flac`. Multi-disc releases get a `Disc N/` subdirectory. |
+| `/config` | Persistent configuration. MakeMKV settings, whipper config, hooks, identification logs, OpenSubtitles JWT. Seeded with defaults on first run. |
+| `/media` | Library root. Contains `archive/{tv,movies}/rips/{medium}/{label}/disc{N}/` (raw rips) and `tv/`, `movies/` (hard-linked library views). Mount your library root here. |
+| `/output-cd` | Audio CD rip output. FLAC files organized as `Artist - Album/Track. Title.flac`. Multi-disc releases get a `Disc N/` subdirectory. |
 
 ## Devices
 
@@ -146,11 +149,17 @@ Find your drive's serial with `udevadm info --query=all --name=/dev/sr0 | grep S
 
 ## Episode Identification
 
-TV disc rips are automatically renamed to `SxxExx - Episode Title.mkv` in the background after ripping. The disc ejects immediately — identification runs asynchronously while the next disc rips.
+After a TV disc rips, `identify-episodes.py` runs in the background to match titles against TMDb and hard-link them into the library. The disc ejects immediately — identification doesn't block the next rip.
 
-Matching uses OpenSubtitles file hashing (most reliable, when available), TMDb episode data with DVD/BD ordering support, duration matching, and subtitle OCR via [pgsrip](https://github.com/ratoaq2/pgsrip) as fallback layers. When `ASSUME_DISC_ORDER=true` (default), sequential disc insertion is assumed — each disc picks up where the last left off.
+Matching layers (in order): OpenSubtitles file hash → TMDb episode data (DVD/BD ordering preferred) → duration matching → subtitle OCR via [pgsrip](https://github.com/ratoaq2/pgsrip). When `ASSUME_DISC_ORDER=true` (default), sequential disc insertion is assumed — each disc picks up where the last left off.
 
-Identification logs are written to `/config/logs/identify-*.log`. A `.episode-manifest.json` is written to the output directory with match details.
+If TMDb doesn't have an entry for your disc, you'll get an error notification with a link to add it. The raw rip is safe in the archive — re-run identification after adding the TMDb entry:
+
+```sh
+docker exec strophalos identify-episodes.py --dir /media/archive/tv/rips/bd/LABEL/disc1 --label LABEL
+```
+
+Logs: `/config/logs/identify-*.log`. Manifests: `.episode-manifest.json` in each archive disc directory.
 
 ## Hooks
 
