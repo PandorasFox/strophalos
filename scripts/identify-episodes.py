@@ -1112,8 +1112,17 @@ def main() -> None:
         link_path = lib_series_dir / new_name
 
         if link_path.exists():
-            new_name = f"{r.episode.code} - {title_safe} (2).mkv"
-            link_path = lib_series_dir / new_name
+            if link_path.stat().st_ino == f.path.stat().st_ino:
+                print(f"  skip (already linked): {f.path.name} → {new_name}")
+                continue
+            # Different file at same name — flag conflict
+            print(f"  conflict: {new_name} exists with different inode")
+            _notify(
+                f"🚫🔗 {series_name} {r.episode.code}: link conflict",
+                f"Library already has a different copy:\n{link_path}\n\nNew rip: {f.path}\nResolve manually.",
+                error=True,
+            )
+            continue
 
         action = "would link" if args.dry_run else "link"
         rel_path = link_path.relative_to(library_dir) if library_dir in link_path.parents else new_name

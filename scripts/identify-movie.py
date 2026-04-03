@@ -142,8 +142,19 @@ def main() -> None:
     link_path = movie_dir / link_name
 
     if link_path.exists():
-        print(f"  Already linked: {link_path}")
-        return
+        existing_inode = link_path.stat().st_ino
+        new_inode = main_feature.stat().st_ino
+        if existing_inode == new_inode:
+            print(f"  Already linked (same file): {link_path}")
+            return
+        else:
+            print(f"  Conflict: {link_path} exists with different inode")
+            _notify(
+                f"🚫🔗 {title}: link conflict",
+                f"Library already has a different copy:\n{link_path}\n\nNew rip: {main_feature}\nResolve manually.",
+                error=True,
+            )
+            return
 
     action = "would link" if args.dry_run else "link"
     print(f"  {action}: {main_feature.name} → movies/{folder_name}/{link_name}")
