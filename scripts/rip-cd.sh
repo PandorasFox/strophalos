@@ -94,6 +94,12 @@ else
     DISC_TPL='%A - %d/%A - %d'
 fi
 
+if [ -n "$MB_TITLE" ]; then
+    /usr/local/bin/notify.sh "Ripping CD" "${MB_ARTIST:-Unknown} - ${MB_TITLE}"
+else
+    /usr/local/bin/notify.sh "Ripping CD" "(unknown disc)"
+fi
+
 whipper cd -d "$DEVICE" rip \
     -O "$OUTPUT" \
     --track-template "$TRACK_TPL" \

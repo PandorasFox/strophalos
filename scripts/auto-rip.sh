@@ -154,10 +154,9 @@ print(s)
 
     if [ "$DRV_FLAGS" -eq 0 ]; then
         log "audio disc — handing off to whipper"
-        notify "Ripping CD" "$DRV_LABEL"
         as_user /usr/local/bin/rip-cd.sh
         RC=$?
-        # rip-cd.sh sends its own detailed notification with MusicBrainz info
+        # rip-cd.sh handles its own notifications (start + completion with MB info)
     else
         log "video disc — running smart rip"
         notify "Ripping disc" "$DRV_LABEL"
