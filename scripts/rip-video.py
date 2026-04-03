@@ -274,11 +274,117 @@ def _score_title_search(disc_label):
     return 0.0, 0.0
 
 
-def classify_disc(durations, chapters, disc_label=None):
-    """Classify disc as 'tv', 'movie', or 'unknown' and return titles to rip.
+def _score_musicbrainz(disc_label, durations):
+    """Check MusicBrainz for a matching release. Returns (music_score, release_info).
 
-    Scores both patterns independently, uses TMDb as a signal when available,
-    and picks the higher-scoring classification.
+    Searches by disc label against the local MusicBrainz replica. If a release
+    matches and track durations align with title durations, returns a high score.
+
+    Returns (score, {artist, title, id}) or (0.0, None).
+    """
+    import json
+    import urllib.parse
+    import urllib.request
+
+    mb_server = os.environ.get("MB_SERVER", "mb-web:5000")
+    query = disc_label.replace("_", " ").strip()
+    if not query:
+        return 0.0, None
+
+    # Search releases by name
+    url = (f"http://{mb_server}/ws/2/release/"
+           f"?query=release:{urllib.parse.quote(query)}&fmt=json&limit=5")
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "strophalos/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+    except Exception as e:
+        print(f"  MusicBrainz: search failed ({e})")
+        return 0.0, None
+
+    releases = data.get("releases", [])
+    if not releases:
+        return 0.0, None
+
+    # Get title durations as a sorted list for comparison
+    title_durs = sorted(durations.values())
+    n_titles = len(title_durs)
+
+    best_score = 0.0
+    best_release = None
+
+    for rel in releases:
+        rel_id = rel.get("id", "")
+        rel_title = rel.get("title", "")
+        artist = ""
+        if rel.get("artist-credit"):
+            artist = rel["artist-credit"][0].get("name", "")
+
+        # Get track durations from the release's media
+        track_durs = []
+        for medium in rel.get("media", []):
+            for track in medium.get("tracks", []):
+                length_ms = track.get("length")
+                if length_ms:
+                    track_durs.append(length_ms / 1000.0)  # ms → seconds
+
+        if not track_durs:
+            # Need to fetch full release for track info
+            try:
+                detail_url = (f"http://{mb_server}/ws/2/release/{rel_id}"
+                              f"?inc=recordings+media&fmt=json")
+                req = urllib.request.Request(detail_url, headers={"User-Agent": "strophalos/1.0"})
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    detail = json.loads(resp.read())
+                for medium in detail.get("media", []):
+                    for track in medium.get("tracks", []):
+                        rec = track.get("recording", {})
+                        length_ms = rec.get("length") or track.get("length")
+                        if length_ms:
+                            track_durs.append(int(length_ms) / 1000.0)
+            except Exception:
+                continue
+
+        if not track_durs:
+            continue
+
+        # Compare track count
+        if len(track_durs) != n_titles:
+            continue
+
+        # Compare durations — sort both and check alignment
+        sorted_tracks = sorted(track_durs)
+        total_diff = 0.0
+        for td, rd in zip(title_durs, sorted_tracks):
+            total_diff += abs(td - rd)
+
+        avg_diff = total_diff / n_titles
+        # Audio tracks should match within ~2 seconds on average
+        if avg_diff < 5.0:
+            score = max(0, 1.0 - avg_diff / 5.0)
+            if score > best_score:
+                best_score = score
+                best_release = {
+                    "artist": artist,
+                    "title": rel_title,
+                    "id": rel_id,
+                    "track_count": len(track_durs),
+                    "avg_diff": avg_diff,
+                }
+
+    if best_release:
+        print(f"  MusicBrainz: matched '{query}' → {best_release['artist']} - {best_release['title']}"
+              f" ({best_release['track_count']} tracks, avg diff {best_release['avg_diff']:.1f}s)")
+
+    return best_score, best_release
+
+
+def classify_disc(durations, chapters, disc_label=None):
+    """Classify disc as 'tv', 'movie', 'music', or 'unknown' and return titles to rip.
+
+    Scores TV, movie, and music patterns independently, uses TMDb and
+    MusicBrainz as signals, and picks the highest-scoring classification.
 
     Returns (disc_type, titles_to_rip, reason)
     """
@@ -290,6 +396,16 @@ def classify_disc(durations, chapters, disc_label=None):
     rest = sorted_titles[1:]
 
     meaningful = [(tid, dur) for tid, dur in sorted_titles if dur >= 120]
+
+    # Check MusicBrainz first — audio BDs have many short tracks that
+    # would be filtered out by the >=120s threshold, so use ALL titles
+    mb_score, mb_release = _score_musicbrainz(disc_label, durations)
+    if mb_score > 0.7:
+        # Strong MB match — this is an audio BD, rip all titles
+        return ("music",
+                list(durations.keys()),
+                f"musicbrainz match: {mb_release['artist']} - {mb_release['title']} "
+                f"(score={mb_score:.2f}, {mb_release['track_count']} tracks)")
 
     if len(meaningful) == 0:
         return "unknown", [t[0] for t in sorted_titles], "no meaningful titles"
@@ -307,6 +423,10 @@ def classify_disc(durations, chapters, disc_label=None):
     m_boost, t_boost = _score_title_search(disc_label)
     m_score += m_boost
     t_score += t_boost
+
+    # Weak MB match can still boost against movie/tv
+    if mb_score > 0.3:
+        print(f"  MusicBrainz: weak match (score={mb_score:.2f}), not overriding")
 
     search_note = ""
     if m_boost or t_boost:
@@ -421,7 +541,7 @@ def main():
         print("\n[dry-run] Would rip the above titles.")
         return
 
-    content_type = "tv" if disc_type == "tv" else "movies"
+    content_type = {"tv": "tv", "music": "music"}.get(disc_type, "movies")
     # Use DRV_LABEL (--label) for consistent directory naming, fall back to CINFO disc_label
     dir_label = args.label or disc_label or "unknown_disc"
     label_dir = os.path.join(args.output, content_type, "rips", media_type, dir_label)

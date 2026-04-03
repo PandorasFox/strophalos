@@ -76,7 +76,7 @@ ln -sf /config /config/.MakeMKV 2>/dev/null || true
 chmod 666 /dev/sr* /dev/sg* 2>/dev/null
 chown -R "$PUID:$PGID" /config /output-cd 2>/dev/null
 # Ensure archive + library dirs exist (don't recursive chown /media)
-for d in /media/archive/tv/rips /media/archive/movies/rips /media/tv /media/movies; do
+for d in /media/archive/tv/rips /media/archive/movies/rips /media/archive/music/rips /media/tv /media/movies /media/music; do
     mkdir -p "$d" 2>/dev/null
     chown "$PUID:$PGID" "$d" 2>/dev/null
 done
@@ -185,19 +185,29 @@ print(s)
         if [ "$RC" -eq 0 ] && [ -n "${TMDB_API_KEY:-}" ]; then
             IDENTIFY_LOG="/config/logs/identify-$(date +%Y%m%d-%H%M%S).log"
             mkdir -p /config/logs
-            if [ "$DISC_TYPE" = "tv" ]; then
-                log "TV disc — starting episode identification (background)"
-                as_user python3 /usr/local/bin/identify-episodes.py \
-                    --dir "$OUTPUT_DIR" --label "$DRV_LABEL" \
-                    --library /media \
-                    >> "$IDENTIFY_LOG" 2>&1 &
-            else
-                log "Movie disc — starting identification (background)"
-                as_user python3 /usr/local/bin/identify-movie.py \
-                    --dir "$OUTPUT_DIR" --label "$DRV_LABEL" \
-                    --library /media \
-                    >> "$IDENTIFY_LOG" 2>&1 &
-            fi
+            case "$DISC_TYPE" in
+                tv)
+                    log "TV disc — starting episode identification (background)"
+                    as_user python3 /usr/local/bin/identify-episodes.py \
+                        --dir "$OUTPUT_DIR" --label "$DRV_LABEL" \
+                        --library /media \
+                        >> "$IDENTIFY_LOG" 2>&1 &
+                    ;;
+                music)
+                    log "Audio BD — starting music identification (background)"
+                    as_user python3 /usr/local/bin/identify-music.py \
+                        --dir "$OUTPUT_DIR" --label "$DRV_LABEL" \
+                        --library /media \
+                        >> "$IDENTIFY_LOG" 2>&1 &
+                    ;;
+                *)
+                    log "Movie disc — starting identification (background)"
+                    as_user python3 /usr/local/bin/identify-movie.py \
+                        --dir "$OUTPUT_DIR" --label "$DRV_LABEL" \
+                        --library /media \
+                        >> "$IDENTIFY_LOG" 2>&1 &
+                    ;;
+            esac
         fi
 
         STATUS=$([ $RC -eq 0 ] && echo "SUCCESS" || echo "FAILURE")
