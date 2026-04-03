@@ -16,7 +16,7 @@ services:
       - PGID=1000
     volumes:
       - ./data:/config:rw
-      - /path/to/video/rips:/output:rw
+      - /path/to/library:/media:rw
       - /path/to/cd/rips:/output-cd:rw
     devices:
       - /dev/sr1:/dev/sr1

@@ -95,6 +95,6 @@ RUN chmod +x /usr/local/bin/*
 
 ENV HOME=/config
 
-VOLUME ["/config", "/output", "/output-cd"]
+VOLUME ["/config", "/media", "/output-cd"]
 
 ENTRYPOINT ["/usr/local/bin/auto-rip.sh"]

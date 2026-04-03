@@ -74,7 +74,10 @@ ln -sf /config /config/.MakeMKV 2>/dev/null || true
 
 # Open device access for non-root rip processes and own the output dirs
 chmod 666 /dev/sr* /dev/sg* 2>/dev/null
-chown -R "$PUID:$PGID" /config /output /output-cd 2>/dev/null
+chown -R "$PUID:$PGID" /config /output-cd 2>/dev/null
+# Don't recursive chown /media — it's the entire library. Just ensure archive dirs exist.
+mkdir -p /media/archive/tv/rips /media/archive/movies/rips 2>/dev/null
+chown "$PUID:$PGID" /media/archive/tv /media/archive/tv/rips /media/archive/movies /media/archive/movies/rips 2>/dev/null
 
 # Seed whipper config if missing
 if [ ! -f /config/.config/whipper/whipper.conf ] && [ -f /defaults/whipper.conf ]; then
@@ -156,19 +159,22 @@ print(s)
     else
         log "video disc — running smart rip"
         notify "Ripping disc" "$DRV_LABEL"
-        RIP_OUTPUT=$(as_user python3 /usr/local/bin/rip-video.py --drive 0 --output /output 2>&1)
+        RIP_OUTPUT=$(as_user python3 /usr/local/bin/rip-video.py --drive 0 2>&1)
         RC=$?
         echo "$RIP_OUTPUT"
 
         # Extract actual output dir from rip-video.py
         OUTPUT_DIR=$(echo "$RIP_OUTPUT" | grep '^STROPHALOS_OUTPUT_DIR=' | cut -d= -f2-)
-        OUTPUT_DIR="${OUTPUT_DIR:-/output/$DRV_LABEL}"
+        OUTPUT_DIR="${OUTPUT_DIR:-/media/archive/movies/rips/unknown/$DRV_LABEL}"
         DISC_TYPE=$(echo "$RIP_OUTPUT" | grep '^STROPHALOS_DISC_TYPE=' | cut -d= -f2-)
 
         TITLE_COUNT=$(echo "$RIP_OUTPUT" | grep '^STROPHALOS_TITLE_COUNT=' | cut -d= -f2-)
 
         if [ $RC -eq 0 ]; then
-            notify "Disc ripped" "$DRV_LABEL — ${TITLE_COUNT:-?} title(s), $DISC_TYPE"
+            MEDIA_TYPE=$(echo "$RIP_OUTPUT" | grep '^STROPHALOS_MEDIA_TYPE=' | cut -d= -f2-)
+            CONTENT_LABEL="movie"
+            [ "$DISC_TYPE" = "tv" ] && CONTENT_LABEL="TV"
+            notify "Disc ripped" "$DRV_LABEL — ${TITLE_COUNT:-?} title(s), $CONTENT_LABEL ($MEDIA_TYPE)"
         else
             notify --error "Disc rip failed" "$DRV_LABEL (exit $RC)"
         fi

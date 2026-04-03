@@ -353,7 +353,7 @@ def rip_titles(drive_id, title_ids, output_dir, min_length=None):
 def main():
     parser = argparse.ArgumentParser(description="Smart video disc ripper")
     parser.add_argument("--drive", type=int, default=0, help="MakeMKV drive ID")
-    parser.add_argument("--output", default="/output", help="Output base directory")
+    parser.add_argument("--output", default="/media/archive", help="Output base directory")
     parser.add_argument("--dry-run", action="store_true", help="Scan and classify only")
     args = parser.parse_args()
 
@@ -389,13 +389,15 @@ def main():
         print("\n[dry-run] Would rip the above titles.")
         return
 
-    out_dir = os.path.join(args.output, media_type, disc_label or "unknown_disc")
+    content_type = "tv" if disc_type == "tv" else "movies"
+    out_dir = os.path.join(args.output, content_type, "rips", media_type, disc_label or "unknown_disc")
 
     print(f"\nRipping {len(to_rip)} title(s) to {out_dir}...")
     rip_titles(args.drive, to_rip, out_dir)
     # Print output dir on a known-format line so auto-rip.sh can capture it
     print(f"STROPHALOS_OUTPUT_DIR={out_dir}")
     print(f"STROPHALOS_DISC_TYPE={disc_type}")
+    print(f"STROPHALOS_MEDIA_TYPE={media_type}")
     print(f"STROPHALOS_TITLE_COUNT={len(to_rip)}")
     print("Done.")
 
