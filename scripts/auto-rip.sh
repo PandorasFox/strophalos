@@ -37,11 +37,29 @@ except Exception as e:
     [ "$STATUS" = "4" ]
 }
 
-# Full disc scan via makemkvcon — only called when disc is confirmed present.
-# Uses disc:0 (full scan) instead of disc:9999 (quick list) because UHD discs
-# need the full AACS2 handshake to be properly identified.
+# Scan the disc — tries quick scan first (works for DVD/BD), falls back to
+# full scan (needed for UHD AACS2 handshake). Timeout prevents hangs on
+# problematic discs.
+SCAN_TIMEOUT_QUICK="${SCAN_TIMEOUT_QUICK:-180}"
+SCAN_TIMEOUT_FULL="${SCAN_TIMEOUT_FULL:-1200}"
+
 scan_drive() {
-    makemkvcon -r info disc:0 2>/dev/null | grep "^DRV:0,"
+    # Quick scan first — works for most discs
+    DRV=$(timeout "$SCAN_TIMEOUT_QUICK" makemkvcon -r info disc:9999 2>/dev/null | grep "^DRV:0,")
+    if [ -n "$DRV" ]; then
+        DRV_FLAGS=$(echo "$DRV" | cut -d',' -f4)
+        DRV_LABEL=$(echo "$DRV" | cut -d',' -f6 | tr -d '"')
+        # If we got a label, quick scan worked — use it
+        if [ -n "$DRV_LABEL" ] || [ "$DRV_FLAGS" -eq 0 ]; then
+            echo "$DRV"
+            return
+        fi
+        # No label but flags set — might be UHD, need full scan
+        log "quick scan got flags=$DRV_FLAGS but no label, trying full scan..."
+    fi
+
+    # Full scan with longer timeout (needed for UHD, may hang on some DVDs)
+    timeout "$SCAN_TIMEOUT_FULL" makemkvcon -r info disc:0 2>/dev/null | grep "^DRV:0,"
 }
 
 eject_disc() {
@@ -132,10 +150,11 @@ print(s)
 
     DISC_WAS_PRESENT=1
 
-    log "disc detected, running full scan (this can take several minutes for UHD)..."
+    log "disc detected, scanning..."
     DRV=$(scan_drive)
     if [ -z "$DRV" ]; then
-        log "scan returned no data, will retry next cycle"
+        log "scan returned no data (timeout or unreadable), will retry next cycle"
+        notify --error "Disc scan failed" "Could not read disc in $DEVICE — will retry"
         DISC_WAS_PRESENT=0
         continue
     fi
