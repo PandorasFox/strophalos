@@ -460,21 +460,21 @@ def rip_titles(drive_id, title_ids, output_dir, min_length=None):
     PROGRESS_INTERVAL = 180  # seconds between progress log lines
 
     for i, tid in enumerate(title_ids):
-        print(f"  Ripping title {tid} ({i + 1}/{len(title_ids)})...")
+        print(f"  Ripping title {tid} ({i + 1}/{len(title_ids)})...", flush=True)
         cmd = [MAKEMKV] + opts.split() + ["mkv", f"disc:{drive_id}", str(tid), output_dir]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
         last_progress_time = _time.monotonic()
         last_pct = -1
-        stderr_tail: list[str] = []
+        output_tail: list[str] = []
 
-        # Read stderr for PRGV progress lines while process runs
-        assert proc.stderr is not None
-        for line in proc.stderr:
+        # In robot mode (-r), makemkvcon sends PRGV progress to stdout
+        assert proc.stdout is not None
+        for line in proc.stdout:
             line = line.strip()
-            stderr_tail.append(line)
-            if len(stderr_tail) > 20:
-                stderr_tail.pop(0)
+            output_tail.append(line)
+            if len(output_tail) > 20:
+                output_tail.pop(0)
 
             # PRGV:current,total,max — progress values
             if line.startswith("PRGV:"):
@@ -485,7 +485,7 @@ def rip_titles(drive_id, title_ids, output_dir, min_length=None):
                         pct = int(current * 100 / pmax) if pmax > 0 else 0
                         now = _time.monotonic()
                         if pct != last_pct and (now - last_progress_time) >= PROGRESS_INTERVAL:
-                            print(f"  title {tid}: {pct}% ({i + 1}/{len(title_ids)})")
+                            print(f"  title {tid}: {pct}% ({i + 1}/{len(title_ids)})", flush=True)
                             last_progress_time = now
                             last_pct = pct
                     except (ValueError, ZeroDivisionError):
@@ -494,11 +494,12 @@ def rip_titles(drive_id, title_ids, output_dir, min_length=None):
         proc.wait()
         if proc.returncode != 0:
             print(f"  WARNING: title {tid} failed (rc={proc.returncode})")
-            for sl in stderr_tail[-5:]:
+            for sl in output_tail[-5:]:
                 print(f"  > {sl}")
-            if proc.stdout:
-                for sl in proc.stdout.read().strip().split('\n')[-5:]:
-                    print(f"  > {sl}")
+            if proc.stderr:
+                for sl in proc.stderr.read().strip().split('\n')[-5:]:
+                    if sl:
+                        print(f"  > {sl}")
 
 
 def main():
