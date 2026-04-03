@@ -161,19 +161,20 @@ print(s)
     else
         log "video disc — running smart rip"
         notify "Ripping disc" "$DRV_LABEL"
-        RIP_OUTPUT=$(as_user python3 /usr/local/bin/rip-video.py --drive 0 --label "$DRV_LABEL" 2>&1)
-        RC=$?
-        echo "$RIP_OUTPUT"
+        # Stream rip output to logs in real-time, tee to temp file for parsing
+        RIP_LOG=$(mktemp)
+        as_user python3 /usr/local/bin/rip-video.py --drive 0 --label "$DRV_LABEL" 2>&1 | tee "$RIP_LOG"
+        RC=${PIPESTATUS[0]}
 
-        # Extract actual output dir from rip-video.py
-        OUTPUT_DIR=$(echo "$RIP_OUTPUT" | grep '^STROPHALOS_OUTPUT_DIR=' | cut -d= -f2-)
+        # Extract metadata from captured output
+        OUTPUT_DIR=$(grep '^STROPHALOS_OUTPUT_DIR=' "$RIP_LOG" | cut -d= -f2-)
         OUTPUT_DIR="${OUTPUT_DIR:-/media/archive/movies/rips/unknown/$DRV_LABEL}"
-        DISC_TYPE=$(echo "$RIP_OUTPUT" | grep '^STROPHALOS_DISC_TYPE=' | cut -d= -f2-)
+        DISC_TYPE=$(grep '^STROPHALOS_DISC_TYPE=' "$RIP_LOG" | cut -d= -f2-)
 
-        TITLE_COUNT=$(echo "$RIP_OUTPUT" | grep '^STROPHALOS_TITLE_COUNT=' | cut -d= -f2-)
+        TITLE_COUNT=$(grep '^STROPHALOS_TITLE_COUNT=' "$RIP_LOG" | cut -d= -f2-)
 
         if [ $RC -eq 0 ]; then
-            MEDIA_TYPE=$(echo "$RIP_OUTPUT" | grep '^STROPHALOS_MEDIA_TYPE=' | cut -d= -f2-)
+            MEDIA_TYPE=$(grep '^STROPHALOS_MEDIA_TYPE=' "$RIP_LOG" | cut -d= -f2-)
             CONTENT_LABEL="movie"
             [ "$DISC_TYPE" = "tv" ] && CONTENT_LABEL="TV"
             notify "Disc ripped" "$DRV_LABEL — ${TITLE_COUNT:-?} title(s), $CONTENT_LABEL ($MEDIA_TYPE)"
@@ -194,6 +195,7 @@ print(s)
 
         STATUS=$([ $RC -eq 0 ] && echo "SUCCESS" || echo "FAILURE")
         run_hook disc_rip_terminated.sh 0 "$DRV_LABEL" "$OUTPUT_DIR" "$STATUS"
+        rm -f "$RIP_LOG"
     fi
 
     LAST_DISC="$DRV"
