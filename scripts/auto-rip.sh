@@ -182,15 +182,23 @@ print(s)
             notify --error "Disc rip failed" "$DRV_LABEL (exit $RC)"
         fi
 
-        # Episode identification for TV discs (background — don't block next rip)
-        if [ "$RC" -eq 0 ] && [ "$DISC_TYPE" = "tv" ] && [ -n "${TMDB_API_KEY:-}" ]; then
-            log "TV disc — starting episode identification (background)"
+        # Library identification (background — don't block next rip)
+        if [ "$RC" -eq 0 ] && [ -n "${TMDB_API_KEY:-}" ]; then
             IDENTIFY_LOG="/config/logs/identify-$(date +%Y%m%d-%H%M%S).log"
             mkdir -p /config/logs
-            as_user python3 /usr/local/bin/identify-episodes.py \
-                --dir "$OUTPUT_DIR" --label "$DRV_LABEL" \
-                --library /media \
-                >> "$IDENTIFY_LOG" 2>&1 &
+            if [ "$DISC_TYPE" = "tv" ]; then
+                log "TV disc — starting episode identification (background)"
+                as_user python3 /usr/local/bin/identify-episodes.py \
+                    --dir "$OUTPUT_DIR" --label "$DRV_LABEL" \
+                    --library /media \
+                    >> "$IDENTIFY_LOG" 2>&1 &
+            else
+                log "Movie disc — starting identification (background)"
+                as_user python3 /usr/local/bin/identify-movie.py \
+                    --dir "$OUTPUT_DIR" --label "$DRV_LABEL" \
+                    --library /media \
+                    >> "$IDENTIFY_LOG" 2>&1 &
+            fi
         fi
 
         STATUS=$([ $RC -eq 0 ] && echo "SUCCESS" || echo "FAILURE")
