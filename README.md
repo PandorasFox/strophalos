@@ -141,25 +141,40 @@ Find your drive's serial with `udevadm info --query=all --name=/dev/sr0 | grep S
 
 6. **Audio CD ripping** -- `rip-cd.sh` queries MusicBrainz via `discid` to identify the disc, detects multi-disc releases (adjusting the output path template to include `Disc N/`), and hands off to `whipper cd rip` for accurate, bit-perfect extraction to FLAC. Disc designations like `(Disc 1 of 3)` are stripped from the top-level directory so multi-disc releases cluster together.
 
-7. **Episode identification** (TV discs, background) -- After a TV disc rip completes, `identify-episodes.py` runs asynchronously to rename files to `SxxExx - Episode Title.mkv`. The disc ejects immediately; identification happens in the background while the next disc can start ripping. See below for details.
+7. **Library identification** (background) -- After ripping, the disc is identified and hard-linked into the library. The disc ejects immediately; identification runs in the background while the next disc starts ripping. See below.
 
 8. **Post-rip hooks** -- Hooks in `/config/hooks/` are executed with disc metadata as arguments.
 
 9. **Eject** -- If `EJECT_ON_COMPLETE=1`, the disc is ejected and the loop resets, ready for the next disc.
 
-## Episode Identification
+## Identification
 
-After a TV disc rips, `identify-episodes.py` runs in the background to match titles against TMDb and hard-link them into the library. The disc ejects immediately — identification doesn't block the next rip.
+All identification runs asynchronously after rip — the disc ejects and the next rip can start immediately. Logs in `/config/logs/identify-*.log`, manifests in each archive disc directory.
 
-Matching layers (in order): OpenSubtitles file hash → TMDb episode data (DVD/BD ordering preferred) → duration matching → subtitle OCR via [pgsrip](https://github.com/ratoaq2/pgsrip). When `ASSUME_DISC_ORDER=true` (default), sequential disc insertion is assumed — each disc picks up where the last left off.
+### Movies
 
-If TMDb doesn't have an entry for your disc, you'll get an error notification with a link to add it. The raw rip is safe in the archive — re-run identification after adding the TMDb entry:
+Straightforward. Disc label is searched on TMDb, canonical title + year is resolved, main feature (largest file) is hard-linked to `movies/{Title} ({year})/`. Extras are linked alongside.
+
+### Audio CDs
+
+Straightforward. Whipper queries MusicBrainz using the disc's TOC hash — this is a deterministic match, not a heuristic. Multi-disc releases are detected and organized into `Disc N/` subdirectories.
+
+### TV Shows
+
+This is the hard one 🥴. Discs have no episode metadata — just numbered titles. Matching layers, in order:
+
+1. **OpenSubtitles hash** -- file hash lookup against the OpenSubtitles database. Definitive when a match exists, but niche releases (anime BDs, indie media) are often missing. Requires [OpenSubtitles VIP](https://www.opensubtitles.com/en/consumers) ($20/yr) for subtitle downloads used in text matching.
+2. **OpenSubtitles text matching** -- download reference SRTs for the series, OCR the disc's PGS subtitles via [pgsrip](https://github.com/ratoaq2/pgsrip), compare dialog text to identify episodes. Most reliable fallback when hashes miss.
+3. **TMDb episode data** -- DVD/BD episode group ordering when available, standard season ordering as fallback. Duration matching narrows candidates.
+4. **Forward-order fallback** -- when `ASSUME_DISC_ORDER=true` (default), assumes sequential disc insertion and assigns the next batch of episodes in order. Each disc picks up where the last left off.
+
+**Constraint**: discs must be ripped in sequential order (disc 1, then 2, etc.) for the forward-order fallback to work. This is the default and handles the common case well.
+
+If TMDb doesn't have an entry for your disc, you'll get an error notification. The raw rip is safe in the archive — add the TMDb entry and re-run:
 
 ```sh
 docker exec strophalos identify-episodes.py --dir /media/archive/tv/rips/bd/LABEL/disc1 --label LABEL
 ```
-
-Logs: `/config/logs/identify-*.log`. Manifests: `.episode-manifest.json` in each archive disc directory.
 
 ## Hooks
 
