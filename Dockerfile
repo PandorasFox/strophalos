@@ -96,5 +96,6 @@ RUN chmod +x /usr/local/bin/*
 ENV HOME=/config
 
 VOLUME ["/config", "/media", "/output-cd"]
+# /media is the library root: archive/tv/rips, archive/movies/rips, library/tv, library/movies
 
 ENTRYPOINT ["/usr/local/bin/auto-rip.sh"]

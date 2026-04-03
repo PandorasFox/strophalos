@@ -353,7 +353,8 @@ def rip_titles(drive_id, title_ids, output_dir, min_length=None):
 def main():
     parser = argparse.ArgumentParser(description="Smart video disc ripper")
     parser.add_argument("--drive", type=int, default=0, help="MakeMKV drive ID")
-    parser.add_argument("--output", default="/media/archive", help="Output base directory")
+    parser.add_argument("--output", default="/media/archive", help="Archive base directory")
+    parser.add_argument("--label", default=None, help="Disc volume label (DRV_LABEL) for directory naming")
     parser.add_argument("--dry-run", action="store_true", help="Scan and classify only")
     args = parser.parse_args()
 
@@ -390,7 +391,15 @@ def main():
         return
 
     content_type = "tv" if disc_type == "tv" else "movies"
-    out_dir = os.path.join(args.output, content_type, "rips", media_type, disc_label or "unknown_disc")
+    # Use DRV_LABEL (--label) for consistent directory naming, fall back to CINFO disc_label
+    dir_label = args.label or disc_label or "unknown_disc"
+    label_dir = os.path.join(args.output, content_type, "rips", media_type, dir_label)
+
+    # Auto-increment disc number
+    disc_num = 1
+    while os.path.exists(os.path.join(label_dir, f"disc{disc_num}")):
+        disc_num += 1
+    out_dir = os.path.join(label_dir, f"disc{disc_num}")
 
     print(f"\nRipping {len(to_rip)} title(s) to {out_dir}...")
     rip_titles(args.drive, to_rip, out_dir)

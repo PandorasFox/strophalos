@@ -394,15 +394,15 @@ def fetch_episodes_standard(series_id: int) -> list[Episode]:
     return episodes
 
 
-def fetch_all_episodes(label: str) -> tuple[list[Episode], list[Episode], str | None]:
+def fetch_all_episodes(label: str) -> tuple[list[Episode], list[Episode], str | None, str | None]:
     """Fetch all episodes for a series.
 
-    Returns (regular_episodes, specials, group_name).
+    Returns (regular_episodes, specials, group_name, series_name).
     Regular episodes sorted by (season, episode); specials sorted separately.
     """
     result = search_series(label)
     if not result:
-        return [], [], None
+        return [], [], None, None
 
     series_id, series_name = result
 
@@ -417,7 +417,7 @@ def fetch_all_episodes(label: str) -> tuple[list[Episode], list[Episode], str | 
     regular = sorted([ep for ep in eps if ep.season > 0], key=lambda e: (e.season, e.episode))
     specials = sorted([ep for ep in eps if ep.season == 0], key=lambda e: e.episode)
 
-    return regular, specials, group_name
+    return regular, specials, group_name, series_name
 
 
 # ---------------------------------------------------------------------------
@@ -896,83 +896,7 @@ def sanitize_filename(name: str) -> str:
     return name
 
 
-def rename_from_hash_results(
-    hash_results: dict[Path, tuple[int, int, str]],
-    dry_run: bool,
-) -> dict[str, dict[str, Any]]:
-    """Rename files using OpenSubtitles hash identification results.
 
-    Returns matched info dict keyed by new filename.
-    """
-    matched: dict[str, dict[str, Any]] = {}
-
-    for path, (season, episode, title) in hash_results.items():
-        code = f"S{season:02d}E{episode:02d}"
-        title_safe = sanitize_filename(title)
-        new_name = f"{code} - {title_safe}.mkv" if title_safe else f"{code}.mkv"
-        new_path = path.parent / new_name
-
-        if new_path.exists() and new_path != path:
-            new_name = f"{code} - {title_safe} (2).mkv"
-            new_path = path.parent / new_name
-
-        action = "would rename" if dry_run else "rename"
-        print(f"  {action}: {path.name} → {new_name}  (hash match)")
-
-        if not dry_run:
-            path.rename(new_path)
-
-        matched[new_name] = {
-            "original": path.name,
-            "score": -1,  # Sentinel: hash match, not score-based
-            "season": season,
-            "episode": episode,
-            "title": title,
-            "method": "opensubtitles_hash",
-        }
-
-    return matched
-
-
-def rename_files(
-    files: list[RippedFile],
-    assignments: list[tuple[int, int, float]],
-    window_episodes: list[Episode],
-    min_score: float,
-    dry_run: bool,
-) -> dict[str, dict[str, Any]]:
-    """Rename files based on assignments. Returns matched info dict."""
-    matched: dict[str, dict[str, Any]] = {}
-
-    for file_idx, ep_idx, score in assignments:
-        if score < min_score:
-            continue
-
-        f = files[file_idx]
-        ep = window_episodes[ep_idx]
-        title_safe = sanitize_filename(ep.title)
-        new_name = f"{ep.code} - {title_safe}.mkv" if title_safe else f"{ep.code}.mkv"
-        new_path = f.path.parent / new_name
-
-        if new_path.exists() and new_path != f.path:
-            new_name = f"{ep.code} - {title_safe} (2).mkv"
-            new_path = f.path.parent / new_name
-
-        action = "would rename" if dry_run else "rename"
-        print(f"  {action}: {f.path.name} → {new_name}  (score={score:.2f})")
-
-        if not dry_run:
-            f.path.rename(new_path)
-
-        matched[new_name] = {
-            "original": f.path.name,
-            "score": round(score, 2),
-            "season": ep.season,
-            "episode": ep.episode,
-            "title": ep.title,
-        }
-
-    return matched
 
 
 # ---------------------------------------------------------------------------
@@ -982,9 +906,10 @@ def rename_files(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Episode identification for TV disc rips")
-    parser.add_argument("--dir", required=True, help="Directory containing ripped MKV files")
+    parser.add_argument("--dir", required=True, help="Archive disc directory containing ripped MKV files")
     parser.add_argument("--label", required=True, help="Disc label for TMDb search")
-    parser.add_argument("--dry-run", action="store_true", help="Show proposed renames without executing")
+    parser.add_argument("--library", default="/media", help="Library root for hard-linked output")
+    parser.add_argument("--dry-run", action="store_true", help="Show proposed links without executing")
     parser.add_argument("--min-score", type=float, default=0.5, help="Minimum score for matching")
     parser.add_argument("--verbose", action="store_true", help="Show OCR text and detailed scoring")
     parser.add_argument(
@@ -1016,6 +941,7 @@ def main() -> None:
     # Pipeline: accumulate MatchResults, rename + notify at end
     # -----------------------------------------------------------------------
     series_name = _clean_disc_label(args.label)
+    library_dir = Path(args.library)
 
     # Build RippedFile objects with durations
     files: list[RippedFile] = []
@@ -1042,20 +968,25 @@ def main() -> None:
         print("  All files identified via OpenSubtitles hash")
     else:
         # --- Layer 1+: TMDb + duration + subtitles ---
-        episodes, specials, group_name = fetch_all_episodes(args.label)
+        episodes, specials, group_name, tmdb_name = fetch_all_episodes(args.label)
+        if tmdb_name:
+            series_name = tmdb_name
         if episodes:
             n_seasons = len({ep.season for ep in episodes})
             print(f"  {len(episodes)} episodes across {n_seasons} season(s)")
 
             # Exclude episodes already matched by hash or already in directory
             matched_ep_keys = {(r.episode.season, r.episode.episode) for r in results.values()}
+            # Scan library for already-linked episodes
             existing_eps: set[tuple[int, int]] = set()
-            for existing in out_dir.glob("S[0-9][0-9]E[0-9][0-9]*.mkv"):
-                m = re.match(r"S(\d+)E(\d+)", existing.name)
-                if m:
-                    existing_eps.add((int(m.group(1)), int(m.group(2))))
+            lib_series_dir = library_dir / "tv" / sanitize_filename(series_name)
+            if lib_series_dir.exists():
+                for existing in lib_series_dir.glob("S[0-9][0-9]E[0-9][0-9]*.mkv"):
+                    m = re.match(r"S(\d+)E(\d+)", existing.name)
+                    if m:
+                        existing_eps.add((int(m.group(1)), int(m.group(2))))
             if existing_eps:
-                print(f"  {len(existing_eps)} already-identified episode(s) in directory")
+                print(f"  {len(existing_eps)} already-linked episode(s) in library")
 
             exclude = matched_ep_keys | existing_eps
             episodes = [ep for ep in episodes if (ep.season, ep.episode) not in exclude]
@@ -1154,10 +1085,12 @@ def main() -> None:
                                 )
 
     # -----------------------------------------------------------------------
-    # Rename all matched files in one pass
+    # Hard-link matched files to library
     # -----------------------------------------------------------------------
     unmatched_names: list[str] = []
     matched_manifest: dict[str, dict[str, Any]] = {}
+
+    lib_series_dir = library_dir / "tv" / sanitize_filename(series_name)
 
     for f in files:
         if f.path not in results:
@@ -1167,20 +1100,22 @@ def main() -> None:
         r = results[f.path]
         title_safe = sanitize_filename(r.episode.title)
         new_name = f"{r.episode.code} - {title_safe}.mkv" if title_safe else f"{r.episode.code}.mkv"
-        new_path = f.path.parent / new_name
+        link_path = lib_series_dir / new_name
 
-        if new_path.exists() and new_path != f.path:
+        if link_path.exists():
             new_name = f"{r.episode.code} - {title_safe} (2).mkv"
-            new_path = f.path.parent / new_name
+            link_path = lib_series_dir / new_name
 
-        action = "would rename" if args.dry_run else "rename"
-        print(f"  {action}: {f.path.name} → {new_name}  [{r.method}]")
+        action = "would link" if args.dry_run else "link"
+        rel_path = link_path.relative_to(library_dir) if library_dir in link_path.parents else new_name
+        print(f"  {action}: {f.path.name} → {rel_path}  [{r.method}]")
 
         if not args.dry_run:
-            f.path.rename(new_path)
+            lib_series_dir.mkdir(parents=True, exist_ok=True)
+            os.link(f.path, link_path)
 
         matched_manifest[new_name] = {
-            "original": f.path.name,
+            "original": str(f.path),
             "season": r.episode.season,
             "episode": r.episode.episode,
             "title": r.episode.title,
@@ -1253,12 +1188,12 @@ def main() -> None:
         r_str = _format_ranges(mrs)
         lines.append(f"{method}: {r_str}")
     lines.append("")
-    lines.append(f"{len(files)} title(s) ripped")
+    lines.append(f"{len(files)} title(s) → {len(matched_manifest)} linked to library")
     if unmatched_names:
-        lines.append(f"{len(unmatched_names)} unmapped file(s)")
+        lines.append(f"{len(unmatched_names)} unmapped file(s) in archive")
 
     body = "\n".join(lines)
-    title = f"{series_name}: episodes identified"
+    title = f"{series_name}: episodes linked"
     print(f"\n{title}\n{body}")
 
     if unmatched_names:

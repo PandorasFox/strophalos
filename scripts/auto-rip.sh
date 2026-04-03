@@ -75,9 +75,11 @@ ln -sf /config /config/.MakeMKV 2>/dev/null || true
 # Open device access for non-root rip processes and own the output dirs
 chmod 666 /dev/sr* /dev/sg* 2>/dev/null
 chown -R "$PUID:$PGID" /config /output-cd 2>/dev/null
-# Don't recursive chown /media — it's the entire library. Just ensure archive dirs exist.
-mkdir -p /media/archive/tv/rips /media/archive/movies/rips 2>/dev/null
-chown "$PUID:$PGID" /media/archive/tv /media/archive/tv/rips /media/archive/movies /media/archive/movies/rips 2>/dev/null
+# Ensure archive + library dirs exist (don't recursive chown /media)
+for d in /media/archive/tv/rips /media/archive/movies/rips /media/tv /media/movies; do
+    mkdir -p "$d" 2>/dev/null
+    chown "$PUID:$PGID" "$d" 2>/dev/null
+done
 
 # Seed whipper config if missing
 if [ ! -f /config/.config/whipper/whipper.conf ] && [ -f /defaults/whipper.conf ]; then
@@ -159,7 +161,7 @@ print(s)
     else
         log "video disc — running smart rip"
         notify "Ripping disc" "$DRV_LABEL"
-        RIP_OUTPUT=$(as_user python3 /usr/local/bin/rip-video.py --drive 0 2>&1)
+        RIP_OUTPUT=$(as_user python3 /usr/local/bin/rip-video.py --drive 0 --label "$DRV_LABEL" 2>&1)
         RC=$?
         echo "$RIP_OUTPUT"
 
@@ -186,6 +188,7 @@ print(s)
             mkdir -p /config/logs
             as_user python3 /usr/local/bin/identify-episodes.py \
                 --dir "$OUTPUT_DIR" --label "$DRV_LABEL" \
+                --library /media \
                 >> "$IDENTIFY_LOG" 2>&1 &
         fi
 
