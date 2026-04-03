@@ -1,0 +1,14 @@
+# Stable symlinks for USB optical drive.
+# Creates /dev/strophalos/disc (sr) and /dev/strophalos/sg (scsi generic)
+# regardless of device renumbering on replug.
+# Replace YOUR_SERIAL with your drive's serial (find with: udevadm info --query=all --name=/dev/sr0 | grep SERIAL)
+# Replace YOUR_USB_VENDOR and YOUR_USB_PRODUCT with your drive's USB bridge IDs (find with: lsusb)
+
+# sr (block) device
+SUBSYSTEM=="block", KERNEL=="sr*", ATTRS{serial}=="YOUR_SERIAL", SYMLINK+="strophalos/disc"
+
+# sg (scsi_generic) device
+SUBSYSTEM=="scsi_generic", KERNEL=="sg*", ATTRS{serial}=="YOUR_SERIAL", SYMLINK+="strophalos/sg"
+
+# USB device node — allow container to reset the device on scan failure
+SUBSYSTEM=="usb", ATTR{idVendor}=="YOUR_USB_VENDOR", ATTR{idProduct}=="YOUR_USB_PRODUCT", MODE="0666", SYMLINK+="strophalos/usb"

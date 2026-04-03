@@ -43,23 +43,106 @@ except Exception as e:
 SCAN_TIMEOUT_QUICK="${SCAN_TIMEOUT_QUICK:-180}"
 SCAN_TIMEOUT_FULL="${SCAN_TIMEOUT_FULL:-1200}"
 
+USB_PORT="${USB_PORT:-2-5}"
+
+reset_usb_device() {
+    UNBIND="/sys/bus/usb/drivers/usb/unbind"
+    BIND="/sys/bus/usb/drivers/usb/bind"
+    if [ ! -w "$UNBIND" ]; then
+        log "USB reset: sysfs not writable"
+        return
+    fi
+    log "USB reset: unbinding $USB_PORT..."
+    printf '%s' "$USB_PORT" > "$UNBIND" 2>/dev/null
+    sleep 2
+    log "USB reset: rebinding $USB_PORT..."
+    printf '%s' "$USB_PORT" > "$BIND" 2>/dev/null
+    sleep 2
+    log "USB reset: done"
+}
+
+_extract_drv() {
+    # Extract DRV:0 line from makemkvcon output, sanitize
+    printf '%s' "$1" | tr -d '\r' | grep "^DRV:0," | head -1
+}
+
+# Run a command with a timeout, killing it properly if it exceeds.
+# Usage: run_with_timeout SECONDS command [args...]
+# Output goes to $TIMEOUT_OUTPUT. Returns 0 on success, 1 on timeout.
+TIMEOUT_OUTPUT=""
+run_with_timeout() {
+    _timeout_secs="$1"
+    shift
+    TIMEOUT_OUTPUT=""
+
+    _outfile=$(mktemp)
+    setsid sh -c '"$@" > "$0" 2>/dev/null' "$_outfile" "$@" &
+    _pid=$!
+
+    _elapsed=0
+    while [ "$_elapsed" -lt "$_timeout_secs" ]; do
+        # Process gone entirely = done
+        if ! kill -0 "$_pid" 2>/dev/null; then
+            wait "$_pid" 2>/dev/null
+            TIMEOUT_OUTPUT=$(cat "$_outfile")
+            rm -f "$_outfile"
+            return 0
+        fi
+        # Zombie = crashed, treat as done
+        if grep -q "^State:.*Z" /proc/"$_pid"/status 2>/dev/null; then
+            wait "$_pid" 2>/dev/null
+            TIMEOUT_OUTPUT=$(cat "$_outfile")
+            rm -f "$_outfile"
+            return 0
+        fi
+        sleep 1
+        _elapsed=$((_elapsed + 1))
+    done
+
+    # Timed out — kill the entire process group (negative PID = group)
+    kill -9 -"$_pid" 2>/dev/null
+    wait "$_pid" 2>/dev/null
+    TIMEOUT_OUTPUT=$(cat "$_outfile")
+    rm -f "$_outfile"
+    return 1
+}
+
 scan_drive() {
     # Quick scan first — works for most discs
-    DRV=$(timeout "$SCAN_TIMEOUT_QUICK" makemkvcon -r info disc:9999 2>/dev/null | grep "^DRV:0,")
-    if [ -n "$DRV" ]; then
-        DRV_FLAGS=$(echo "$DRV" | cut -d',' -f4)
-        DRV_LABEL=$(echo "$DRV" | cut -d',' -f6 | tr -d '"')
-        # If we got a label, quick scan worked — use it
-        if [ -n "$DRV_LABEL" ] || [ "$DRV_FLAGS" -eq 0 ]; then
-            echo "$DRV"
-            return
-        fi
-        # No label but flags set — might be UHD, need full scan
-        log "quick scan got flags=$DRV_FLAGS but no label, trying full scan..."
+    log "quick scan (${SCAN_TIMEOUT_QUICK}s timeout)..." >&2
+    if run_with_timeout "$SCAN_TIMEOUT_QUICK" makemkvcon -r info disc:9999; then
+        DRV=$(_extract_drv "$TIMEOUT_OUTPUT")
+    else
+        log "quick scan timed out" >&2
+        DRV=""
     fi
 
+    if [ -n "$DRV" ]; then
+        DRV_FLAGS=$(printf '%s' "$DRV" | cut -d',' -f4)
+        DRV_LABEL=$(printf '%s' "$DRV" | cut -d',' -f6 | tr -d '"')
+        if [ -n "$DRV_LABEL" ]; then
+            # Got a label — quick scan is definitive
+            log "quick scan OK: '$DRV_LABEL' (flags=$DRV_FLAGS)" >&2
+            printf '%s' "$DRV"
+            return
+        fi
+        # No label: flags=0 might be audio CD or might be unreadable disc.
+        # Fall through to full scan to confirm.
+        log "quick scan got flags=$DRV_FLAGS but no label, falling back to full scan..." >&2
+    else
+        log "quick scan returned nothing, falling back to full scan..." >&2
+    fi
+
+    # Reset USB device between scans to clear any leaked handles from dead makemkvcon
+    reset_usb_device >&2
+
     # Full scan with longer timeout (needed for UHD, may hang on some DVDs)
-    timeout "$SCAN_TIMEOUT_FULL" makemkvcon -r info disc:0 2>/dev/null | grep "^DRV:0,"
+    log "full scan (${SCAN_TIMEOUT_FULL}s timeout)..." >&2
+    if run_with_timeout "$SCAN_TIMEOUT_FULL" makemkvcon -r info disc:0; then
+        _extract_drv "$TIMEOUT_OUTPUT"
+    else
+        log "full scan timed out" >&2
+    fi
 }
 
 eject_disc() {
@@ -153,14 +236,18 @@ print(s)
     log "disc detected, scanning..."
     DRV=$(scan_drive)
     if [ -z "$DRV" ]; then
-        log "scan returned no data (timeout or unreadable), will retry next cycle"
-        notify --error "Disc scan failed" "Could not read disc in $DEVICE — will retry"
+        log "scan failed (timeout or unreadable), resetting USB device"
+        reset_usb_device
+        notify --error "Disc scan failed" "Could not read disc in $DEVICE — remove disc manually"
         DISC_WAS_PRESENT=0
+        LAST_DISC=""
         continue
     fi
 
-    DRV_FLAGS=$(echo "$DRV" | cut -d',' -f4)
-    DRV_LABEL=$(echo "$DRV" | cut -d',' -f6 | tr -d '"')
+    # Sanitize — makemkvcon can output \r, \n, or multiple lines
+    DRV=$(printf '%s' "$DRV" | tr -d '\r\n' | head -1)
+    DRV_FLAGS=$(printf '%s' "$DRV" | cut -d',' -f4)
+    DRV_LABEL=$(printf '%s' "$DRV" | cut -d',' -f6 | tr -d '"')
 
     # Audio CDs have flags=0 and no label — that's expected, route to whipper.
     # Video discs with no label after a full scan are genuinely unreadable.
@@ -181,8 +268,11 @@ print(s)
         notify "Ripping disc" "$DRV_LABEL"
         # Stream rip output to logs in real-time, tee to temp file for parsing
         RIP_LOG=$(mktemp)
-        as_user python3 /usr/local/bin/rip-video.py --drive 0 --label "$DRV_LABEL" 2>&1 | tee "$RIP_LOG"
-        RC=${PIPESTATUS[0]}
+        as_user python3 /usr/local/bin/rip-video.py --drive 0 --label "$DRV_LABEL" 2>&1 | tee "$RIP_LOG"; RC=$?
+        # Check if rip-video.py actually succeeded (tee always returns 0)
+        if grep -q '^STROPHALOS_OUTPUT_DIR=' "$RIP_LOG"; then
+            RC=0
+        fi
 
         # Extract metadata from captured output
         OUTPUT_DIR=$(grep '^STROPHALOS_OUTPUT_DIR=' "$RIP_LOG" | cut -d= -f2-)
