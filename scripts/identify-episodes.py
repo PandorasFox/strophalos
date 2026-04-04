@@ -4,7 +4,6 @@
 Matches ripped MKV files to TMDb episodes using multiple identification layers:
 - OpenSubtitles hash lookup (file hash → episode metadata)
 - AniDB ed2k hash lookup (anime identification via UDP API)
-- SubDB hash lookup (subtitle download for text-matching fallback)
 - Duration filtering and subtitle text scoring
 
 Usage: identify-episodes.py --dir /output/bd/Show --label DISC_LABEL [--dry-run]
@@ -13,11 +12,9 @@ Usage: identify-episodes.py --dir /output/bd/Show --label DISC_LABEL [--dry-run]
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
-import socket
 import struct
 import shutil
 import subprocess
@@ -267,55 +264,31 @@ ANIDB_CACHE = Path("/config/anidb-cache.json")
 ANIDB_HOST = "api.anidb.net"
 ANIDB_PORT = 9000
 ANIDB_PROTO_VER = 3
-
-# Check if MD4 is available (needed for ed2k hash)
-_MD4_AVAILABLE = True
-try:
-    hashlib.new("md4", b"", usedforsecurity=False)
-except ValueError:
-    _MD4_AVAILABLE = False
+ANIDB_CLIENT = "strophalos"
+ANIDB_CLIENTVER = 1
 
 
-def _ed2k_hash(path: Path) -> str | None:
-    """Compute the ed2k hash (MD4-based) for AniDB file lookup.
-
-    Split file into 9500 KiB chunks, MD4 each chunk.
-    Single chunk → that MD4 is the hash. Multiple → MD4 of concatenated chunk hashes.
-    """
-    if not _MD4_AVAILABLE:
+def _ed2k_hash(path: Path) -> tuple[str, int] | None:
+    """Compute the ed2k hash for AniDB file lookup. Returns (hash, size) or None."""
+    try:
+        from ed2k import ed2k_hash
+    except ImportError:
+        print("  AniDB: ed2k library not installed (pip install ed2k)")
         return None
 
-    CHUNK_SIZE = 9728000  # 9500 KiB
-
     try:
-        file_size = path.stat().st_size
-        if file_size == 0:
-            return None
-
-        chunk_hashes: list[bytes] = []
         with open(path, "rb") as f:
-            while True:
-                chunk = f.read(CHUNK_SIZE)
-                if not chunk:
-                    break
-                h = hashlib.new("md4", chunk, usedforsecurity=False)
-                chunk_hashes.append(h.digest())
-
-        if len(chunk_hashes) == 1:
-            return chunk_hashes[0].hex()
-
-        h = hashlib.new("md4", b"".join(chunk_hashes), usedforsecurity=False)
-        return h.digest().hex()
+            size, h = ed2k_hash(f)
+        return h, size
     except Exception as e:
         print(f"  AniDB: ed2k hash failed for {path.name}: {e}")
         return None
 
 
 def _load_anidb_config() -> dict[str, Any] | None:
-    """Load AniDB config from /config/anidb.json. Returns None if not configured.
+    """Load AniDB credentials from /config/anidb.json. Returns None if not configured.
 
-    Expected format: {"username": "...", "api_password": "...",
-                      "client": "strophalos", "clientver": 1}
+    Expected format: {"username": "...", "password": "..."}
     """
     if not ANIDB_CONFIG.exists():
         return None
@@ -324,16 +297,15 @@ def _load_anidb_config() -> dict[str, Any] | None:
     except Exception:
         return None
 
-    if not config.get("username") or not config.get("api_password"):
-        return None
-    if not config.get("client") or not config.get("clientver"):
+    if not config.get("username") or not config.get("password"):
         return None
 
     return config
 
 
-def _anidb_send(sock: socket.socket, command: str) -> tuple[int, str]:
+def _anidb_send(sock: "socket.socket", command: str) -> tuple[int, str]:
     """Send a UDP command to AniDB, return (response_code, body)."""
+    import socket
     sock.sendto(command.encode("utf-8"), (ANIDB_HOST, ANIDB_PORT))
     data, _ = sock.recvfrom(65536)
     resp = data.decode("utf-8")
@@ -343,7 +315,7 @@ def _anidb_send(sock: socket.socket, command: str) -> tuple[int, str]:
 
 
 def _load_anidb_cache() -> dict[str, Any]:
-    """Load the AniDB lookup cache. Keys are ed2k hashes."""
+    """Load AniDB lookup cache. Keys are 'ed2k:size' strings."""
     if ANIDB_CACHE.exists():
         try:
             return json.loads(ANIDB_CACHE.read_text())
@@ -353,7 +325,7 @@ def _load_anidb_cache() -> dict[str, Any]:
 
 
 def _save_anidb_cache(cache: dict[str, Any]) -> None:
-    """Persist the AniDB lookup cache."""
+    """Persist AniDB lookup cache."""
     try:
         ANIDB_CACHE.write_text(json.dumps(cache, indent=2))
     except Exception:
@@ -365,12 +337,11 @@ def anidb_identify(
 ) -> dict[Path, tuple[int, int, str]] | None:
     """Identify anime episodes via AniDB ed2k hash + file size.
 
-    Caches results in /config/anidb-cache.json to avoid repeat API calls.
-    Returns {path: (season, episode, title)} or None if AniDB is unavailable.
-    Regular episodes map to season 1, specials to season 0.
+    Rate limiting: 2s delay for first 5 packets, 4s after (per AniDB rules).
+    Caches all results (hits + misses) in /config/anidb-cache.json keyed by
+    'ed2k_hash:file_size' so re-runs never re-query the same file.
     """
-    if not _MD4_AVAILABLE:
-        return None
+    import socket
 
     config = _load_anidb_config()
     if config is None:
@@ -380,15 +351,18 @@ def anidb_identify(
 
     # Compute hashes and check cache
     cache = _load_anidb_cache()
-    file_hashes: list[tuple[Path, str, int]] = []  # (path, ed2k, size)
+    uncached: list[tuple[Path, str, int]] = []  # (path, ed2k, size)
     results: dict[Path, tuple[int, int, str]] = {}
 
     for mkv in mkv_files:
-        ed2k = _ed2k_hash(mkv)
-        if not ed2k:
+        hash_result = _ed2k_hash(mkv)
+        if not hash_result:
             continue
 
-        cached = cache.get(ed2k)
+        ed2k, file_size = hash_result
+        cache_key = f"{ed2k}:{file_size}"
+        cached = cache.get(cache_key)
+
         if cached is not None:
             if cached:  # cached hit (not a cached miss)
                 season, epno, title = cached
@@ -398,10 +372,9 @@ def anidb_identify(
                 print(f"    {mkv.name}: not in AniDB (cached)")
             continue
 
-        file_hashes.append((mkv, ed2k, mkv.stat().st_size))
+        uncached.append((mkv, ed2k, file_size))
 
-    if not file_hashes:
-        # Everything was cached
+    if not uncached:
         if results:
             print(f"  AniDB: {len(results)}/{len(mkv_files)} identified (all cached)")
         return results if results else None
@@ -409,16 +382,18 @@ def anidb_identify(
     # Need to query — open UDP session
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(10)
+    packet_count = 0
 
     try:
         # Authenticate
         auth_cmd = (
-            f"AUTH user={config['username']}&pass={config['api_password']}"
+            f"AUTH user={config['username']}&pass={config['password']}"
             f"&protover={ANIDB_PROTO_VER}"
-            f"&client={config['client']}&clientver={config['clientver']}"
+            f"&client={ANIDB_CLIENT}&clientver={ANIDB_CLIENTVER}"
             f"&enc=UTF-8"
         )
         code, body = _anidb_send(sock, auth_cmd)
+        packet_count += 1
 
         if code not in (200, 201):
             print(f"  AniDB: auth failed ({code}): {body.strip()}")
@@ -426,13 +401,14 @@ def anidb_identify(
             return results if results else None
 
         session = body.split()[0]
-        print(f"  AniDB: authenticated, querying {len(file_hashes)} file(s)...")
+        print(f"  AniDB: authenticated, querying {len(uncached)} file(s)...")
 
-        for i, (mkv, ed2k, file_size) in enumerate(file_hashes):
-            if i > 0:
-                time.sleep(2.0)  # AniDB rate limit: max 1 packet per 2 seconds
+        for mkv, ed2k, file_size in uncached:
+            # AniDB rate limit: 2s for first 5 packets, 4s after
+            delay = 2.0 if packet_count < 5 else 4.0
+            time.sleep(delay)
 
-            # FILE command: fmask gets aid, amask gets anime name + episode info
+            # FILE command: fmask gets aid, amask gets anime/ep names
             # fmask 0x4000000000 = aid
             # amask 0x00A0C000 = romaji name, english name, epno, ep name
             file_cmd = (
@@ -441,6 +417,8 @@ def anidb_identify(
                 f"&s={session}"
             )
             code, body = _anidb_send(sock, file_cmd)
+            packet_count += 1
+            cache_key = f"{ed2k}:{file_size}"
 
             if code == 220:
                 # Response: "FILE\n{fid}|{aid}|{romaji}|{english}|{epno}|{ep_name}"
@@ -448,11 +426,11 @@ def anidb_identify(
                 if len(lines) >= 2:
                     fields = lines[1].split("|")
                     if len(fields) >= 6:
-                        anime_name = fields[3] or fields[2]  # prefer english name
+                        anime_name = fields[3] or fields[2]  # prefer english
                         epno_raw = fields[4]
                         ep_name = fields[5]
 
-                        # Parse epno: "1" = regular, "S1" = special, "C1" = credits, etc.
+                        # Parse epno: "1" = regular, "S1" = special
                         season = 1
                         ep_match = re.match(r"^(\d+)$", epno_raw)
                         if ep_match:
@@ -462,29 +440,30 @@ def anidb_identify(
                             epno = int(epno_raw[1:])
                         else:
                             print(f"    {mkv.name}: unusual episode format '{epno_raw}', skipping")
-                            cache[ed2k] = []  # cache as miss
+                            cache[cache_key] = []
                             continue
 
                         results[mkv] = (season, epno, ep_name or anime_name)
-                        cache[ed2k] = [season, epno, ep_name or anime_name]
+                        cache[cache_key] = [season, epno, ep_name or anime_name]
                         print(f"    {mkv.name}: S{season:02d}E{epno:02d} — {ep_name} ({anime_name})")
                     else:
                         print(f"    {mkv.name}: unexpected response format")
             elif code == 320:
                 print(f"    {mkv.name}: not in AniDB")
-                cache[ed2k] = []  # cache negative result
+                cache[cache_key] = []  # cache negative result
             elif code == 501:
                 print("  AniDB: session expired, stopping")
                 break
             elif code in (555, 604):
                 # 555 = BANNED, 604 = TIMEOUT - DELAY AND RESUBMIT
-                print(f"  AniDB: rate limited ({code}), stopping")
+                print(f"  AniDB: rate limited/banned ({code}), stopping")
                 break
             else:
                 print(f"    {mkv.name}: AniDB response ({code}): {body.strip()}")
 
         # Logout
         try:
+            time.sleep(2.0)
             _anidb_send(sock, f"LOGOUT s={session}")
         except Exception:
             pass
@@ -501,76 +480,6 @@ def anidb_identify(
         print("  AniDB: no files identified")
 
     return results if results else None
-
-
-# ---------------------------------------------------------------------------
-# SubDB — hash-based subtitle download for text-matching fallback
-# ---------------------------------------------------------------------------
-
-SUBDB_API = "http://api.thesubdb.com/"
-SUBDB_USER_AGENT = "SubDB/1.0 (strophalos/1.0; https://github.com/strophalos)"
-
-
-def _subdb_hash(path: Path) -> str | None:
-    """Compute SubDB hash: MD5 of first 64KB + last 64KB."""
-    BLOCK_SIZE = 65536
-
-    try:
-        file_size = path.stat().st_size
-        if file_size < BLOCK_SIZE * 2:
-            return None
-
-        md5 = hashlib.md5(usedforsecurity=False)
-        with open(path, "rb") as f:
-            md5.update(f.read(BLOCK_SIZE))
-            f.seek(file_size - BLOCK_SIZE)
-            md5.update(f.read(BLOCK_SIZE))
-
-        return md5.hexdigest()
-    except Exception as e:
-        print(f"  SubDB: hash failed for {path.name}: {e}")
-        return None
-
-
-def _subdb_download_subs(file_hash: str) -> str | None:
-    """Download English subtitles from SubDB. Returns SRT text or None."""
-    import urllib.request
-
-    url = f"{SUBDB_API}?action=download&hash={file_hash}&language=en"
-    req = urllib.request.Request(url, headers={"User-Agent": SUBDB_USER_AGENT})
-
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            if resp.status == 200:
-                return resp.read().decode("utf-8", errors="replace")
-    except Exception:
-        pass
-
-    return None
-
-
-def subdb_fetch_subtitles(mkv_path: Path, duration: float) -> list[tuple[float, str]]:
-    """Try to fetch subtitles from SubDB for a file.
-
-    Returns (timestamp, text) pairs filtered to first 25% of duration,
-    or empty list if unavailable.
-    """
-    file_hash = _subdb_hash(mkv_path)
-    if not file_hash:
-        return []
-
-    srt_text = _subdb_download_subs(file_hash)
-    if not srt_text:
-        return []
-
-    print(f"    SubDB: downloaded subtitles for {mkv_path.name}")
-
-    results = _parse_srt(srt_text)
-    cutoff = duration * 0.25
-    if cutoff > 0:
-        results = [(t, text) for t, text in results if t <= cutoff]
-
-    return results
 
 
 # ---------------------------------------------------------------------------
@@ -853,14 +762,12 @@ def _parse_srt(srt_text: str) -> list[tuple[float, str]]:
 def extract_subtitles(mkv_path: Path, duration: float) -> list[tuple[float, str]]:
     """Extract subtitle text from an MKV via pgsrip (PGS→SRT) or direct extraction (text subs).
 
-    Falls back to SubDB subtitle download when no embedded subs are available.
     Returns (timestamp_seconds, text) pairs filtered to first 25% of duration.
     """
     tracks = list_subtitle_tracks(mkv_path)
     track = select_best_track(tracks)
     if not track:
-        # No embedded subs — try SubDB
-        return subdb_fetch_subtitles(mkv_path, duration)
+        return []
 
     cutoff = duration * 0.25
 
@@ -926,11 +833,6 @@ def extract_subtitles(mkv_path: Path, duration: float) -> list[tuple[float, str]
 
     if cutoff > 0:
         results = [(t, text) for t, text in results if t <= cutoff]
-
-    # If embedded subs yielded nothing, try SubDB
-    if not results:
-        return subdb_fetch_subtitles(mkv_path, duration)
-
     return results
 
 
