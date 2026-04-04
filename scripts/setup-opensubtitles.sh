@@ -77,7 +77,6 @@ except Exception as e:
 # Extract token from response
 python3 -c "
 import json, sys
-from datetime import datetime, timedelta, timezone
 
 resp = json.loads(sys.argv[1])
 api_key = sys.argv[2]
@@ -87,12 +86,8 @@ if not token:
     print('ERROR: No token in response: ' + json.dumps(resp), file=sys.stderr)
     sys.exit(1)
 
-# OpenSubtitles JWT tokens are valid for 24 hours
-expires = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
-
 config = {
     'token': token,
-    'expires': expires,
     'api_key': api_key,
     'base_url': resp.get('base_url', ''),
 }
@@ -101,7 +96,6 @@ with open('${CONFIG_FILE}', 'w') as f:
     json.dump(config, f, indent=2)
 
 print('Token stored in ${CONFIG_FILE}')
-print(f'  Expires: {expires}')
 if resp.get('base_url'):
     print(f'  Base URL: {resp[\"base_url\"]}')
 print('OpenSubtitles setup complete.')

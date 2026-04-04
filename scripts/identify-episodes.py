@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Post-rip episode identification for TV disc rips.
 
-Matches ripped MKV files to TMDb episodes using OpenSubtitles hash lookup,
-duration filtering, subtitle text extraction, and scoring-based assignment.
+Matches ripped MKV files to TMDb episodes using multiple identification layers:
+- OpenSubtitles hash lookup (file hash → episode metadata)
+- AniDB ed2k hash lookup (anime identification via UDP API)
+- SubDB hash lookup (subtitle download for text-matching fallback)
+- Duration filtering and subtitle text scoring
 
 Usage: identify-episodes.py --dir /output/bd/Show --label DISC_LABEL [--dry-run]
 """
@@ -10,9 +13,11 @@ Usage: identify-episodes.py --dir /output/bd/Show --label DISC_LABEL [--dry-run]
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import socket
 import struct
 import shutil
 import subprocess
@@ -55,7 +60,7 @@ class MatchResult:
     """Result of identifying a single file."""
     file: RippedFile
     episode: Episode
-    method: str  # "opensubtitles_hash", "subtitle_match", "duration", "forward_order"
+    method: str  # "opensubtitles hash", "anidb hash", "subtitle match", "duration", "forward order"
     score: float = 0.0
 
 
@@ -126,34 +131,28 @@ def _load_opensubtitles_config() -> dict[str, Any] | None:
     return config
 
 
-def _opensubtitles_token_expired(config: dict[str, Any]) -> bool:
-    """Check whether the stored JWT token has expired."""
-    expires_str = config.get("expires", "")
-    if not expires_str:
-        return True
-    try:
-        expires = datetime.fromisoformat(expires_str)
-        if expires.tzinfo is None:
-            expires = expires.replace(tzinfo=timezone.utc)
-        return datetime.now(timezone.utc) >= expires
-    except Exception:
-        return True
-
-
-def _opensubtitles_refresh_token(config: dict[str, Any]) -> dict[str, Any] | None:
-    """Refresh an expired OpenSubtitles JWT token. Returns updated config or None."""
+def _opensubtitles_token_valid(config: dict[str, Any]) -> bool:
+    """Check whether the stored JWT token is valid by hitting the API."""
     import urllib.request
 
     api_key = config.get("api_key", "")
-    if not api_key:
-        return None
+    token = config.get("token", "")
+    if not api_key or not token:
+        return False
 
-    # The v2 API does not have a dedicated refresh endpoint that works without
-    # credentials. If the token is expired, we cannot refresh it without the
-    # user's password. Log and return None so the caller falls back gracefully.
-    print("  OpenSubtitles: JWT token expired. Re-run setup-opensubtitles.sh to re-authenticate.")
-    _notify("OpenSubtitles token expired", "Run: docker exec -it strophalos setup-opensubtitles.sh", error=True)
-    return None
+    try:
+        req = urllib.request.Request(
+            f"{OPENSUBTITLES_API_BASE}/infos/user",
+            headers={
+                "Api-Key": api_key,
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "strophalos v1.0",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
 
 
 def _opensubtitles_get(
@@ -199,10 +198,10 @@ def opensubtitles_identify(
     if config is None:
         return None
 
-    if _opensubtitles_token_expired(config):
-        config = _opensubtitles_refresh_token(config)
-        if config is None:
-            return None
+    if not _opensubtitles_token_valid(config):
+        print("  OpenSubtitles: token invalid. Re-run setup-opensubtitles.sh to re-authenticate.")
+        _notify("OpenSubtitles token invalid", "Run: docker exec -it strophalos setup-opensubtitles.sh", error=True)
+        return None
 
     print("  OpenSubtitles: attempting hash-based identification...")
     results: dict[Path, tuple[int, int, str]] = {}
@@ -257,6 +256,321 @@ def opensubtitles_identify(
         print("  OpenSubtitles: no files identified via hash lookup")
 
     return results if results else None
+
+
+# ---------------------------------------------------------------------------
+# AniDB UDP API — ed2k hash-based anime identification
+# ---------------------------------------------------------------------------
+
+ANIDB_CONFIG = Path("/config/anidb.json")
+ANIDB_CACHE = Path("/config/anidb-cache.json")
+ANIDB_HOST = "api.anidb.net"
+ANIDB_PORT = 9000
+ANIDB_PROTO_VER = 3
+
+# Check if MD4 is available (needed for ed2k hash)
+_MD4_AVAILABLE = True
+try:
+    hashlib.new("md4", b"", usedforsecurity=False)
+except ValueError:
+    _MD4_AVAILABLE = False
+
+
+def _ed2k_hash(path: Path) -> str | None:
+    """Compute the ed2k hash (MD4-based) for AniDB file lookup.
+
+    Split file into 9500 KiB chunks, MD4 each chunk.
+    Single chunk → that MD4 is the hash. Multiple → MD4 of concatenated chunk hashes.
+    """
+    if not _MD4_AVAILABLE:
+        return None
+
+    CHUNK_SIZE = 9728000  # 9500 KiB
+
+    try:
+        file_size = path.stat().st_size
+        if file_size == 0:
+            return None
+
+        chunk_hashes: list[bytes] = []
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                h = hashlib.new("md4", chunk, usedforsecurity=False)
+                chunk_hashes.append(h.digest())
+
+        if len(chunk_hashes) == 1:
+            return chunk_hashes[0].hex()
+
+        h = hashlib.new("md4", b"".join(chunk_hashes), usedforsecurity=False)
+        return h.digest().hex()
+    except Exception as e:
+        print(f"  AniDB: ed2k hash failed for {path.name}: {e}")
+        return None
+
+
+def _load_anidb_config() -> dict[str, Any] | None:
+    """Load AniDB config from /config/anidb.json. Returns None if not configured.
+
+    Expected format: {"username": "...", "api_password": "...",
+                      "client": "strophalos", "clientver": 1}
+    """
+    if not ANIDB_CONFIG.exists():
+        return None
+    try:
+        config = json.loads(ANIDB_CONFIG.read_text())
+    except Exception:
+        return None
+
+    if not config.get("username") or not config.get("api_password"):
+        return None
+    if not config.get("client") or not config.get("clientver"):
+        return None
+
+    return config
+
+
+def _anidb_send(sock: socket.socket, command: str) -> tuple[int, str]:
+    """Send a UDP command to AniDB, return (response_code, body)."""
+    sock.sendto(command.encode("utf-8"), (ANIDB_HOST, ANIDB_PORT))
+    data, _ = sock.recvfrom(65536)
+    resp = data.decode("utf-8")
+    code = int(resp[:3])
+    body = resp[4:] if len(resp) > 4 else ""
+    return code, body
+
+
+def _load_anidb_cache() -> dict[str, Any]:
+    """Load the AniDB lookup cache. Keys are ed2k hashes."""
+    if ANIDB_CACHE.exists():
+        try:
+            return json.loads(ANIDB_CACHE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_anidb_cache(cache: dict[str, Any]) -> None:
+    """Persist the AniDB lookup cache."""
+    try:
+        ANIDB_CACHE.write_text(json.dumps(cache, indent=2))
+    except Exception:
+        pass
+
+
+def anidb_identify(
+    mkv_files: list[Path],
+) -> dict[Path, tuple[int, int, str]] | None:
+    """Identify anime episodes via AniDB ed2k hash + file size.
+
+    Caches results in /config/anidb-cache.json to avoid repeat API calls.
+    Returns {path: (season, episode, title)} or None if AniDB is unavailable.
+    Regular episodes map to season 1, specials to season 0.
+    """
+    if not _MD4_AVAILABLE:
+        return None
+
+    config = _load_anidb_config()
+    if config is None:
+        return None
+
+    print("  AniDB: attempting ed2k hash identification...")
+
+    # Compute hashes and check cache
+    cache = _load_anidb_cache()
+    file_hashes: list[tuple[Path, str, int]] = []  # (path, ed2k, size)
+    results: dict[Path, tuple[int, int, str]] = {}
+
+    for mkv in mkv_files:
+        ed2k = _ed2k_hash(mkv)
+        if not ed2k:
+            continue
+
+        cached = cache.get(ed2k)
+        if cached is not None:
+            if cached:  # cached hit (not a cached miss)
+                season, epno, title = cached
+                results[mkv] = (season, epno, title)
+                print(f"    {mkv.name}: S{season:02d}E{epno:02d} — {title} (cached)")
+            else:
+                print(f"    {mkv.name}: not in AniDB (cached)")
+            continue
+
+        file_hashes.append((mkv, ed2k, mkv.stat().st_size))
+
+    if not file_hashes:
+        # Everything was cached
+        if results:
+            print(f"  AniDB: {len(results)}/{len(mkv_files)} identified (all cached)")
+        return results if results else None
+
+    # Need to query — open UDP session
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(10)
+
+    try:
+        # Authenticate
+        auth_cmd = (
+            f"AUTH user={config['username']}&pass={config['api_password']}"
+            f"&protover={ANIDB_PROTO_VER}"
+            f"&client={config['client']}&clientver={config['clientver']}"
+            f"&enc=UTF-8"
+        )
+        code, body = _anidb_send(sock, auth_cmd)
+
+        if code not in (200, 201):
+            print(f"  AniDB: auth failed ({code}): {body.strip()}")
+            _notify("AniDB auth failed", f"Code {code}: {body.strip()}", error=True)
+            return results if results else None
+
+        session = body.split()[0]
+        print(f"  AniDB: authenticated, querying {len(file_hashes)} file(s)...")
+
+        for i, (mkv, ed2k, file_size) in enumerate(file_hashes):
+            if i > 0:
+                time.sleep(2.0)  # AniDB rate limit: max 1 packet per 2 seconds
+
+            # FILE command: fmask gets aid, amask gets anime name + episode info
+            # fmask 0x4000000000 = aid
+            # amask 0x00A0C000 = romaji name, english name, epno, ep name
+            file_cmd = (
+                f"FILE size={file_size}&ed2k={ed2k}"
+                f"&fmask=4000000000&amask=00A0C000"
+                f"&s={session}"
+            )
+            code, body = _anidb_send(sock, file_cmd)
+
+            if code == 220:
+                # Response: "FILE\n{fid}|{aid}|{romaji}|{english}|{epno}|{ep_name}"
+                lines = body.strip().split("\n")
+                if len(lines) >= 2:
+                    fields = lines[1].split("|")
+                    if len(fields) >= 6:
+                        anime_name = fields[3] or fields[2]  # prefer english name
+                        epno_raw = fields[4]
+                        ep_name = fields[5]
+
+                        # Parse epno: "1" = regular, "S1" = special, "C1" = credits, etc.
+                        season = 1
+                        ep_match = re.match(r"^(\d+)$", epno_raw)
+                        if ep_match:
+                            epno = int(ep_match.group(1))
+                        elif epno_raw.upper().startswith("S") and epno_raw[1:].isdigit():
+                            season = 0
+                            epno = int(epno_raw[1:])
+                        else:
+                            print(f"    {mkv.name}: unusual episode format '{epno_raw}', skipping")
+                            cache[ed2k] = []  # cache as miss
+                            continue
+
+                        results[mkv] = (season, epno, ep_name or anime_name)
+                        cache[ed2k] = [season, epno, ep_name or anime_name]
+                        print(f"    {mkv.name}: S{season:02d}E{epno:02d} — {ep_name} ({anime_name})")
+                    else:
+                        print(f"    {mkv.name}: unexpected response format")
+            elif code == 320:
+                print(f"    {mkv.name}: not in AniDB")
+                cache[ed2k] = []  # cache negative result
+            elif code == 501:
+                print("  AniDB: session expired, stopping")
+                break
+            elif code in (555, 604):
+                # 555 = BANNED, 604 = TIMEOUT - DELAY AND RESUBMIT
+                print(f"  AniDB: rate limited ({code}), stopping")
+                break
+            else:
+                print(f"    {mkv.name}: AniDB response ({code}): {body.strip()}")
+
+        # Logout
+        try:
+            _anidb_send(sock, f"LOGOUT s={session}")
+        except Exception:
+            pass
+
+    except Exception as e:
+        print(f"  AniDB: error: {e}")
+    finally:
+        sock.close()
+        _save_anidb_cache(cache)
+
+    if results:
+        print(f"  AniDB: identified {len(results)}/{len(mkv_files)} file(s)")
+    else:
+        print("  AniDB: no files identified")
+
+    return results if results else None
+
+
+# ---------------------------------------------------------------------------
+# SubDB — hash-based subtitle download for text-matching fallback
+# ---------------------------------------------------------------------------
+
+SUBDB_API = "http://api.thesubdb.com/"
+SUBDB_USER_AGENT = "SubDB/1.0 (strophalos/1.0; https://github.com/strophalos)"
+
+
+def _subdb_hash(path: Path) -> str | None:
+    """Compute SubDB hash: MD5 of first 64KB + last 64KB."""
+    BLOCK_SIZE = 65536
+
+    try:
+        file_size = path.stat().st_size
+        if file_size < BLOCK_SIZE * 2:
+            return None
+
+        md5 = hashlib.md5(usedforsecurity=False)
+        with open(path, "rb") as f:
+            md5.update(f.read(BLOCK_SIZE))
+            f.seek(file_size - BLOCK_SIZE)
+            md5.update(f.read(BLOCK_SIZE))
+
+        return md5.hexdigest()
+    except Exception as e:
+        print(f"  SubDB: hash failed for {path.name}: {e}")
+        return None
+
+
+def _subdb_download_subs(file_hash: str) -> str | None:
+    """Download English subtitles from SubDB. Returns SRT text or None."""
+    import urllib.request
+
+    url = f"{SUBDB_API}?action=download&hash={file_hash}&language=en"
+    req = urllib.request.Request(url, headers={"User-Agent": SUBDB_USER_AGENT})
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status == 200:
+                return resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        pass
+
+    return None
+
+
+def subdb_fetch_subtitles(mkv_path: Path, duration: float) -> list[tuple[float, str]]:
+    """Try to fetch subtitles from SubDB for a file.
+
+    Returns (timestamp, text) pairs filtered to first 25% of duration,
+    or empty list if unavailable.
+    """
+    file_hash = _subdb_hash(mkv_path)
+    if not file_hash:
+        return []
+
+    srt_text = _subdb_download_subs(file_hash)
+    if not srt_text:
+        return []
+
+    print(f"    SubDB: downloaded subtitles for {mkv_path.name}")
+
+    results = _parse_srt(srt_text)
+    cutoff = duration * 0.25
+    if cutoff > 0:
+        results = [(t, text) for t, text in results if t <= cutoff]
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -539,12 +853,14 @@ def _parse_srt(srt_text: str) -> list[tuple[float, str]]:
 def extract_subtitles(mkv_path: Path, duration: float) -> list[tuple[float, str]]:
     """Extract subtitle text from an MKV via pgsrip (PGS→SRT) or direct extraction (text subs).
 
+    Falls back to SubDB subtitle download when no embedded subs are available.
     Returns (timestamp_seconds, text) pairs filtered to first 25% of duration.
     """
     tracks = list_subtitle_tracks(mkv_path)
     track = select_best_track(tracks)
     if not track:
-        return []
+        # No embedded subs — try SubDB
+        return subdb_fetch_subtitles(mkv_path, duration)
 
     cutoff = duration * 0.25
 
@@ -610,6 +926,11 @@ def extract_subtitles(mkv_path: Path, duration: float) -> list[tuple[float, str]
 
     if cutoff > 0:
         results = [(t, text) for t, text in results if t <= cutoff]
+
+    # If embedded subs yielded nothing, try SubDB
+    if not results:
+        return subdb_fetch_subtitles(mkv_path, duration)
+
     return results
 
 
@@ -953,7 +1274,7 @@ def main() -> None:
     results: dict[Path, MatchResult] = {}
     remaining = list(files)
 
-    # --- Layer 0: OpenSubtitles hash ---
+    # --- Layer 0: Hash-based identification (OpenSubtitles + AniDB) ---
     hash_results = opensubtitles_identify(mkv_files)
     if hash_results:
         for path, (season, episode, title) in hash_results.items():
@@ -964,8 +1285,21 @@ def main() -> None:
                 remaining = [f for f in remaining if f.path != path]
         print(f"  OpenSubtitles: {len(hash_results)}/{len(files)} identified via hash")
 
+    # AniDB: try remaining files (anime identification)
+    if remaining:
+        remaining_paths = [f.path for f in remaining]
+        anidb_results = anidb_identify(remaining_paths)
+        if anidb_results:
+            for path, (season, episode, title) in anidb_results.items():
+                rf = next((f for f in remaining if f.path == path), None)
+                if rf:
+                    ep = Episode(season=season, episode=episode, title=title, runtime_seconds=0)
+                    results[path] = MatchResult(file=rf, episode=ep, method="anidb hash")
+                    remaining = [f for f in remaining if f.path != path]
+            print(f"  AniDB: {len(anidb_results)}/{len(files)} identified via ed2k hash")
+
     if not remaining:
-        print("  All files identified via OpenSubtitles hash")
+        print("  All files identified via hash lookup")
     else:
         # --- Layer 1+: TMDb + duration + subtitles ---
         episodes, specials, group_name, tmdb_name = fetch_all_episodes(args.label)
@@ -1071,10 +1405,21 @@ def main() -> None:
                         best = max(scores_by_window)
                         second = sorted(scores_by_window, reverse=True)[1] if len(scores_by_window) > 1 else 0
                         margin = (best - second) / best if best > 0 else 0
-                        if margin < 0.15 and assume_order:
+                        if margin < 0.15 and assume_order and existing_eps:
+                            # We have prior context — continue from where we left off
                             window = episodes[:n]
                             print(f"  Scores indistinct (margin={margin:.0%}), forward order: {window[0].code}–{window[-1].code}")
                             use_forward = True
+                        elif margin < 0.15:
+                            # No prior context and no signal — refuse to guess
+                            print(f"  Scores indistinct (margin={margin:.0%}), no prior context — cannot identify")
+                            _notify(
+                                f"{series_name}: identification failed",
+                                f"No subtitle/hash/duration signal and no prior disc context.\n"
+                                f"{len(remaining)} file(s) in archive, manual identification needed.",
+                                error=True,
+                            )
+                            remaining = []  # Don't assign anything
 
                     if use_forward:
                         for i, f in enumerate(remaining):
