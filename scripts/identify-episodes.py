@@ -767,7 +767,8 @@ def extract_subtitles(mkv_path: Path, duration: float) -> list[tuple[float, str]
     tracks = list_subtitle_tracks(mkv_path)
     track = select_best_track(tracks)
     if not track:
-        return []
+        # No embedded subs — try Whisper audio transcription
+        return transcribe_audio(mkv_path, duration)
 
     cutoff = duration * 0.25
 
@@ -833,6 +834,97 @@ def extract_subtitles(mkv_path: Path, duration: float) -> list[tuple[float, str]
 
     if cutoff > 0:
         results = [(t, text) for t, text in results if t <= cutoff]
+
+    # If embedded subs yielded nothing, try Whisper
+    if not results:
+        return transcribe_audio(mkv_path, duration)
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Whisper audio-to-text fallback
+# ---------------------------------------------------------------------------
+
+WHISPER_URL = os.environ.get("WHISPER_URL", "")  # e.g. http://whisper:9000
+
+
+def transcribe_audio(mkv_path: Path, duration: float) -> list[tuple[float, str]]:
+    """Transcribe audio via external Whisper container (if configured).
+
+    Extracts the first 25% of audio from the MKV via ffmpeg, POSTs it to
+    the Whisper ASR webservice, and returns (timestamp, text) pairs in the
+    same format as extract_subtitles().
+
+    Requires WHISPER_URL env var pointing to a running instance of
+    onerahmet/openai-whisper-asr-webservice. Model and language are
+    configured on the Whisper container side (ASR_MODEL, ASR_MODEL_LANGUAGE).
+    """
+    if not WHISPER_URL:
+        return []
+
+    cutoff = duration * 0.25
+    if cutoff <= 0:
+        return []
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        wav_path = Path(tmpdir) / "audio.wav"
+
+        # Extract first 25% of audio as mono 16kHz WAV (what Whisper expects)
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-i", str(mkv_path),
+                    "-t", str(cutoff),
+                    "-ac", "1", "-ar", "16000",
+                    "-vn", "-f", "wav",
+                    str(wav_path),
+                ],
+                capture_output=True, timeout=120,
+            )
+        except Exception:
+            return []
+
+        if not wav_path.exists() or wav_path.stat().st_size == 0:
+            return []
+
+        # POST to Whisper ASR webservice
+        import urllib.request
+
+        try:
+            # Build multipart form data
+            boundary = "----strophalos-whisper"
+            body = (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="audio_file"; filename="audio.wav"\r\n'
+                f"Content-Type: audio/wav\r\n\r\n"
+            ).encode() + wav_path.read_bytes() + f"\r\n--{boundary}--\r\n".encode()
+
+            req = urllib.request.Request(
+                f"{WHISPER_URL.rstrip('/')}/asr?output=json",
+                data=body,
+                headers={
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                data = json.loads(resp.read())
+        except Exception as e:
+            print(f"    Whisper: transcription failed: {e}")
+            return []
+
+    # Parse response — segments have start/end/text
+    results: list[tuple[float, str]] = []
+    for seg in data.get("segments", []):
+        ts = seg.get("start", 0.0)
+        text = seg.get("text", "").strip()
+        if text and ts <= cutoff:
+            results.append((ts, text))
+
+    if results:
+        print(f"    Whisper: transcribed {len(results)} segment(s) from {mkv_path.name}")
+
     return results
 
 

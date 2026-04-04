@@ -11,6 +11,7 @@ services:
       - TMDB_API_KEY=  # optional, improves TV vs movie classification
       - OPENSUBTITLES_API_KEY=  # optional, enables hash-based episode identification
       - ASSUME_DISC_ORDER=true  # assume discs are ripped in order (disable for out-of-order ripping)
+      - WHISPER_URL=http://whisper:9000  # optional, enables audio-to-text episode identification
       - NOTIFY_URL=  # apprise URL for notifications, e.g. tgram://bot_token/chat_id
       - PUID=1000
       - PGID=1000
@@ -21,3 +22,19 @@ services:
     devices:
       - /dev/sr1:/dev/sr1
       - /dev/sg7:/dev/sg7  # SCSI generic device for UHD/BD+ decryption
+
+  # Optional: Whisper speech-to-text for episode identification + lyrics
+  # Transcribes audio when no embedded subtitles are available.
+  # Model/language configured here; strophalos just POSTs audio to it.
+  whisper:
+    image: onerahmet/openai-whisper-asr-webservice:latest
+    container_name: whisper
+    restart: unless-stopped
+    environment:
+      - ASR_ENGINE=faster_whisper
+      - ASR_MODEL=medium.en  # tiny|base|small|medium|large-v3 (.en for English-only)
+    volumes:
+      - whisper-cache:/root/.cache  # persist downloaded models
+
+volumes:
+  whisper-cache:
