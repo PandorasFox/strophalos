@@ -2,7 +2,7 @@
 # Debian base, makemkv built from source, whipper for audio CDs.
 # No GUI — just rips.
 
-ARG MAKEMKV_VERSION=1.18.3
+ARG MAKEMKV_VERSION=1.17.6
 ARG LIBDVDCSS_VERSION=1.4.3
 
 # --- Build stage: makemkv + libdvdcss ---
@@ -26,8 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 
 # Build makemkv
-RUN wget -q "https://www.makemkv.com/download/makemkv-oss-${MAKEMKV_VERSION}.tar.gz" \
-    && wget -q "https://www.makemkv.com/download/makemkv-bin-${MAKEMKV_VERSION}.tar.gz" \
+RUN wget -q "https://www.makemkv.com/download/old/makemkv-oss-${MAKEMKV_VERSION}.tar.gz" \
+    && wget -q "https://www.makemkv.com/download/old/makemkv-bin-${MAKEMKV_VERSION}.tar.gz" \
     && tar xzf "makemkv-oss-${MAKEMKV_VERSION}.tar.gz" \
     && tar xzf "makemkv-bin-${MAKEMKV_VERSION}.tar.gz" \
     && cd "makemkv-oss-${MAKEMKV_VERSION}" \
@@ -118,5 +118,8 @@ ENV HOME=/config
 
 VOLUME ["/config", "/media", "/output-cd"]
 # /media is the library root: archive/tv/rips, archive/movies/rips, library/tv, library/movies
+
+# HACK: strace for firmware flash debugging — remove later
+RUN apt-get update && apt-get install -y --no-install-recommends strace && rm -rf /var/lib/apt/lists/*
 
 CMD ["/usr/local/bin/auto-rip.sh"]
