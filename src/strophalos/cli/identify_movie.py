@@ -1,94 +1,16 @@
-#!/usr/bin/env python3
-"""Post-rip movie identification — hard-links the main feature to the library.
-
-Searches TMDb by disc label, gets canonical title + year, and creates a
-hard link in the Jellyfin/Plex-friendly structure:
-  /media/library/movies/{Title} ({year})/{Title}.mkv
-
-Usage: identify-movie.py --dir /media/archive/movies/rips/bd/LABEL/disc1 --label LABEL
-"""
+"""CLI entry point for identify-movie — TMDb lookup + hard-link to library."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import re
-import shutil
-import subprocess
-import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
-NOTIFY_SCRIPT = shutil.which("notify.sh") or "/usr/local/bin/notify.sh"
-API_BASE = "https://api.themoviedb.org/3"
-
-
-def _notify(title: str, body: str, error: bool = False) -> None:
-    try:
-        cmd = [NOTIFY_SCRIPT]
-        if error:
-            cmd.append("--error")
-        cmd.extend([title, body])
-        subprocess.run(cmd, capture_output=True, timeout=10)
-    except Exception:
-        pass
-
-
-def _tmdb_get(endpoint: str, params: dict[str, str] | None = None) -> dict[str, Any] | None:
-    import urllib.parse
-    import urllib.request
-
-    api_key = os.environ.get("TMDB_API_KEY", "")
-    if not api_key:
-        return None
-
-    all_params = {"api_key": api_key}
-    if params:
-        all_params.update(params)
-
-    url = f"{API_BASE}{endpoint}?{urllib.parse.urlencode(all_params)}"
-    try:
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read())
-    except Exception as e:
-        print(f"  TMDb request failed: {e}")
-        return None
-
-
-def _clean_label(label: str) -> str:
-    name = label.replace("_", " ")
-    name = re.sub(r"\s*(DISC\s*\d+|BDMV|BD|DVD|UHD)\s*$", "", name, flags=re.IGNORECASE)
-    return name.strip()
-
-
-def sanitize_filename(name: str) -> str:
-    name = name.replace(":", " -")
-    name = re.sub(r'[?*<>|"\\]', "", name)
-    name = re.sub(r"\s+", " ", name).strip()
-    return name
-
-
-def search_movie(label: str) -> dict[str, Any] | None:
-    """Search TMDb for a movie. Returns top result dict or None."""
-    query = _clean_label(label)
-    if not query:
-        return None
-
-    data = _tmdb_get("/search/movie", {"query": query})
-    if not data:
-        return None
-
-    results = data.get("results", [])
-    if not results:
-        print(f"  TMDb: no movie results for '{query}'")
-        return None
-
-    top = results[0]
-    print(f"  TMDb: matched '{query}' → {top.get('title')} ({top.get('release_date', '?')[:4]})")
-    return top
+from strophalos.backends.tmdb import clean_movie_label, search_movie
+from strophalos.core.fs import sanitize_filename
+from strophalos.core.notify import notify
 
 
 def main() -> None:
@@ -125,13 +47,13 @@ def main() -> None:
     # Search TMDb
     movie = search_movie(args.label)
     if not movie:
-        clean = _clean_label(args.label)
+        clean = clean_movie_label(args.label)
         msg = f"No TMDb match for '{clean}'. Add the movie at https://www.themoviedb.org and re-run."
         print(f"  {msg}")
-        _notify(f"{clean}: identification failed", msg, error=True)
+        notify(f"{clean}: identification failed", msg, error=True)
         return
 
-    title = movie.get("title", _clean_label(args.label))
+    title = movie.get("title", clean_movie_label(args.label))
     year = movie.get("release_date", "")[:4]
     title_safe = sanitize_filename(title)
     folder_name = f"{title_safe} ({year})" if year else title_safe
@@ -149,8 +71,8 @@ def main() -> None:
             return
         else:
             print(f"  Conflict: {link_path} exists with different inode")
-            _notify(
-                f"🚫🔗 {title}: link conflict",
+            notify(
+                f"{title}: link conflict",
                 f"Library already has a different copy:\n{link_path}\n\nNew rip: {main_feature}\nResolve manually.",
                 error=True,
             )
@@ -190,7 +112,7 @@ def main() -> None:
     body = f"{title} ({year})\n{main_size_gb:.1f} GB main feature"
     if extras:
         body += f"\n{len(extras)} extra(s)"
-    _notify(f"{title}: linked to library", body)
+    notify(f"{title}: linked to library", body)
     print(f"Done: {folder_name}")
 
 

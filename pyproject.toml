@@ -1,0 +1,47 @@
+[project]
+name = "strophalos"
+version = "0.1.0"
+description = "Zero-touch automatic disc-to-library pipeline"
+requires-python = ">=3.11"
+dependencies = [
+    "apprise",
+    "discid",
+    "ed2k",
+    "pgsrip",
+    "Pillow",
+    "pydvdid-m",
+]
+
+[project.scripts]
+rip-video = "strophalos.cli.rip_video:main"
+rip-cd = "strophalos.cli.rip_cd:main"
+identify-episodes = "strophalos.cli.identify_episodes:main"
+identify-movie = "strophalos.cli.identify_movie:main"
+identify-music = "strophalos.cli.identify_music:main"
+probe-disc = "strophalos.cli.probe_disc:main"
+rip-dvd = "strophalos.cli.rip_dvd:main"
+rip-data = "strophalos.cli.rip_data:main"
+notify = "strophalos.cli.notify:main"
+setup-key = "strophalos.cli.setup_key:main"
+setup-opensubtitles = "strophalos.cli.setup_opensubtitles:main"
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/strophalos"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["strophalos"]

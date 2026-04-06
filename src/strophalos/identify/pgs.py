@@ -67,7 +67,6 @@ def _decode_rle(data: bytes, width: int, height: int) -> list[int]:
         pos += 1
 
         if byte != 0:
-            # Single pixel of this color
             pixels.append(byte)
         else:
             if pos >= end:
@@ -76,22 +75,18 @@ def _decode_rle(data: bytes, width: int, height: int) -> list[int]:
             pos += 1
 
             if flag == 0:
-                # End of line — pad to width boundary
                 remaining = width - (len(pixels) % width) if len(pixels) % width != 0 else 0
                 pixels.extend([0] * remaining)
             elif flag & 0xC0 == 0x00:
-                # Short run of color 0
                 count = flag & 0x3F
                 pixels.extend([0] * count)
             elif flag & 0xC0 == 0x40:
-                # Long run of color 0
                 if pos >= end:
                     break
                 count = ((flag & 0x3F) << 8) | data[pos]
                 pos += 1
                 pixels.extend([0] * count)
             elif flag & 0xC0 == 0x80:
-                # Short run of specific color
                 count = flag & 0x3F
                 if pos >= end:
                     break
@@ -99,7 +94,6 @@ def _decode_rle(data: bytes, width: int, height: int) -> list[int]:
                 pos += 1
                 pixels.extend([color] * count)
             elif flag & 0xC0 == 0xC0:
-                # Long run of specific color
                 if pos + 1 >= end:
                     break
                 count = ((flag & 0x3F) << 8) | data[pos]
@@ -119,10 +113,8 @@ def _bitmap_to_image(
 ) -> Image.Image:
     """Convert palette-indexed pixel array to binary image for OCR.
 
-    PGS subtitles have bright fill text (white/yellow) with dark outlines.
-    We keep only bright pixels (luminance > threshold), discarding the
-    outline entirely. This gives tesseract clean characters without the
-    confusing outline artifacts.
+    Keeps only bright pixels (alpha > 128), discarding outlines and
+    anti-aliasing fringes.
     """
     img = Image.new("L", (width, height), 0)
     img_data = img.load()
@@ -133,9 +125,6 @@ def _bitmap_to_image(
             if idx < len(pixels):
                 color_idx = pixels[idx]
                 _r, _g, _b, a = palette.get(color_idx, (0, 0, 0, 0))
-                # Solid pixels = white, transparent/faint = black.
-                # Threshold at 128 to filter anti-aliasing fringes from
-                # adjacent subtitle objects (e.g. Japanese text layer).
                 if a > 128:
                     img_data[x, y] = 255
 
@@ -171,7 +160,6 @@ def extract_subtitle_images(
 
             pts, _dts, seg_type, data_len = header
 
-            # Early termination
             if max_pts is not None and pts > max_pts:
                 f.seek(data_len, 1)
                 continue
@@ -189,19 +177,15 @@ def extract_subtitle_images(
             elif seg_type == ODS:
                 if len(data) < 4:
                     continue
-                # _obj_id = struct.unpack(">H", data[0:2])[0]
-                # _version = data[2]
                 seq_flag = data[3]
 
                 if seq_flag & 0x80:  # First (or only) segment
                     if len(data) < 11:
                         continue
-                    # _total_len = (data[4] << 16) | (data[5] << 8) | data[6]
                     obj_width = struct.unpack(">H", data[7:9])[0]
                     obj_height = struct.unpack(">H", data[9:11])[0]
                     obj_data = data[11:]
                 else:
-                    # Continuation segment
                     obj_data += data[4:]
 
                 if seq_flag & 0x40:  # Last segment — object complete
@@ -209,8 +193,6 @@ def extract_subtitle_images(
                         pixels = _decode_rle(obj_data, obj_width, obj_height)
                         img = _bitmap_to_image(pixels, obj_width, obj_height, palette)
                         results.append((current_pts, img))
-
-            # END and WDS segments are ignored
 
     results.sort(key=lambda x: x[0])
     return results

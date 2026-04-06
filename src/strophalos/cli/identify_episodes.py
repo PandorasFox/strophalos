@@ -1,0 +1,368 @@
+"""CLI entry point for identify-episodes — multi-layer TV episode identification.
+
+Pipeline:
+  Phase 0: Hash-based identification (OpenSubtitles, AniDB)
+  Phase 1: Duration pre-filter + subtitle acquisition
+  Phase 2: Score matrix + Hungarian assignment
+  Fallback: Forward-order assumption when scores are indistinct
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from pathlib import Path
+
+from strophalos.backends import anidb, opensubtitles
+from strophalos.backends.tmdb import fetch_all_episodes
+from strophalos.core.fs import sanitize_filename
+from strophalos.core.mkv import get_mkv_duration
+from strophalos.core.notify import notify
+from strophalos.identify.assignment import (
+    _build_score_matrix,
+    assign_episodes,
+    find_best_window,
+    hungarian_assignment,
+)
+from strophalos.identify.scoring import compute_word_weights
+from strophalos.identify.subtitles import extract_subtitles
+from strophalos.types import Episode, MatchResult, RippedFile
+
+
+def _format_ranges(match_results: list[MatchResult]) -> str:
+    """Build episode range strings (detect contiguous runs)."""
+    eps = sorted((r.episode.season, r.episode.episode) for r in match_results)
+    if not eps:
+        return ""
+    ranges: list[str] = []
+    run_start = run_end = eps[0]
+    for s, e in eps[1:]:
+        prev_s, prev_e = run_end
+        if s == prev_s and e == prev_e + 1:
+            run_end = (s, e)
+        else:
+            ranges.append(_format_run(run_start, run_end))
+            run_start = run_end = (s, e)
+    ranges.append(_format_run(run_start, run_end))
+    return ", ".join(ranges)
+
+
+def _format_run(start: tuple[int, int], end: tuple[int, int]) -> str:
+    if start == end:
+        return f"S{start[0]:02d}E{start[1]:02d}"
+    if start[0] == end[0]:
+        return f"S{start[0]:02d}E{start[1]:02d}–E{end[1]:02d}"
+    return f"S{start[0]:02d}E{start[1]:02d}–S{end[0]:02d}E{end[1]:02d}"
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Episode identification for TV disc rips")
+    parser.add_argument("--dir", required=True, help="Archive disc directory containing ripped MKV files")
+    parser.add_argument("--label", required=True, help="Disc label for TMDb search")
+    parser.add_argument("--library", default="/media", help="Library root for hard-linked output")
+    parser.add_argument("--dry-run", action="store_true", help="Show proposed links without executing")
+    parser.add_argument("--min-score", type=float, default=0.5, help="Minimum score for matching")
+    parser.add_argument("--verbose", action="store_true", help="Show OCR text and detailed scoring")
+    parser.add_argument(
+        "--no-assume-order",
+        action="store_true",
+        help="Don't assume discs are inserted in order (disable forward-order fallback)",
+    )
+    args = parser.parse_args()
+
+    assume_order = os.environ.get("ASSUME_DISC_ORDER", "1").lower() not in ("0", "false", "no")
+    if args.no_assume_order:
+        assume_order = False
+
+    out_dir = Path(args.dir)
+    if not out_dir.is_dir():
+        print(f"Directory not found: {out_dir}")
+        return
+
+    mkv_files = sorted(out_dir.glob("*_t[0-9][0-9].mkv"))
+    if not mkv_files:
+        print("No MKV files found")
+        return
+
+    print(f"Found {len(mkv_files)} MKV file(s)")
+
+    series_name = args.label.replace("_", " ").strip()
+    library_dir = Path(args.library)
+
+    # Build RippedFile objects with durations
+    files: list[RippedFile] = []
+    for mkv in mkv_files:
+        dur = get_mkv_duration(mkv)
+        files.append(RippedFile(path=mkv, duration_seconds=dur))
+        print(f"  {mkv.name}: {dur:.0f}s")
+
+    results: dict[Path, MatchResult] = {}
+    remaining = list(files)
+
+    # --- Phase 0: Hash-based identification ---
+    hash_results = opensubtitles.identify(mkv_files)
+    if hash_results:
+        for path, (season, episode, title) in hash_results.items():
+            rf = next((f for f in remaining if f.path == path), None)
+            if rf:
+                ep = Episode(season=season, episode=episode, title=title, runtime_seconds=0)
+                results[path] = MatchResult(file=rf, episode=ep, method="opensubtitles hash")
+                remaining = [f for f in remaining if f.path != path]
+        print(f"  OpenSubtitles: {len(hash_results)}/{len(files)} identified via hash")
+
+    if remaining:
+        remaining_paths = [f.path for f in remaining]
+        anidb_results = anidb.identify(remaining_paths)
+        if anidb_results:
+            for path, (season, episode, title) in anidb_results.items():
+                rf = next((f for f in remaining if f.path == path), None)
+                if rf:
+                    ep = Episode(season=season, episode=episode, title=title, runtime_seconds=0)
+                    results[path] = MatchResult(file=rf, episode=ep, method="anidb hash")
+                    remaining = [f for f in remaining if f.path != path]
+            print(f"  AniDB: {len(anidb_results)}/{len(files)} identified via ed2k hash")
+
+    if not remaining:
+        print("  All files identified via hash lookup")
+    else:
+        # --- Phase 1+: TMDb + duration + subtitles ---
+        episodes, specials, group_name, tmdb_name = fetch_all_episodes(args.label)
+        if tmdb_name:
+            series_name = tmdb_name
+        if not episodes and not tmdb_name:
+            msg = (
+                f"No TMDb match for '{series_name}'. Add the series at https://www.themoviedb.org and re-run:\n"
+                f"  docker exec strophalos identify-episodes --dir {args.dir} --label {args.label}"
+            )
+            print(f"  {msg}")
+            notify(f"{series_name}: identification failed", msg, error=True)
+        elif not episodes:
+            msg = f"TMDb matched '{series_name}' but no episodes found. Check the TMDb entry has seasons/episodes."
+            print(f"  {msg}")
+            notify(f"{series_name}: no episodes on TMDb", msg, error=True)
+        if episodes:
+            n_seasons = len({ep.season for ep in episodes})
+            print(f"  {len(episodes)} episodes across {n_seasons} season(s)")
+
+            # Exclude already-matched and already-linked episodes
+            matched_ep_keys = {(r.episode.season, r.episode.episode) for r in results.values()}
+            existing_eps: set[tuple[int, int]] = set()
+            lib_series_dir = library_dir / "tv" / sanitize_filename(series_name)
+            if lib_series_dir.exists():
+                for existing in lib_series_dir.glob("S[0-9][0-9]E[0-9][0-9]*.mkv"):
+                    m = re.match(r"S(\d+)E(\d+)", existing.name)
+                    if m:
+                        existing_eps.add((int(m.group(1)), int(m.group(2))))
+            if existing_eps:
+                print(f"  {len(existing_eps)} already-linked episode(s) in library")
+
+            exclude = matched_ep_keys | existing_eps
+            episodes = [ep for ep in episodes if (ep.season, ep.episode) not in exclude]
+
+            if episodes and remaining:
+                # Duration filter
+                need_subs = False
+                for f in remaining:
+                    candidates = [
+                        ep
+                        for ep in episodes
+                        if ep.runtime_seconds <= 0
+                        or abs(f.duration_seconds - ep.runtime_seconds) / max(ep.runtime_seconds, 1) <= 0.05
+                    ]
+                    if len(candidates) != 1:
+                        need_subs = True
+                        break
+
+                if need_subs:
+                    print("  Duration-only matching insufficient, extracting subtitles...")
+
+                    def _process_file(f: RippedFile) -> tuple[RippedFile, int]:
+                        f.subtitle_texts = extract_subtitles(f.path, f.duration_seconds)
+                        return f, len(f.subtitle_texts)
+
+                    with ThreadPoolExecutor(max_workers=min(4, len(remaining))) as pool:
+                        futures = {pool.submit(_process_file, f): f for f in remaining}
+                        for future in as_completed(futures):
+                            f, n_cues = future.result()
+                            print(f"  {f.path.name}: {n_cues} subtitle cue(s)")
+
+                    # Deduplicate common cues (OP/ED)
+                    if len(remaining) > 1:
+                        cue_counts: Counter[str] = Counter()
+                        for f in remaining:
+                            seen: set[str] = set()
+                            for _, text in f.subtitle_texts:
+                                normalized = text.strip().lower()
+                                if normalized not in seen:
+                                    cue_counts[normalized] += 1
+                                    seen.add(normalized)
+                        threshold = len(remaining) // 2
+                        common_cues = {t for t, c in cue_counts.items() if c > threshold}
+                        if common_cues:
+                            for f in remaining:
+                                f.subtitle_texts = [
+                                    (t, text) for t, text in f.subtitle_texts if text.strip().lower() not in common_cues
+                                ]
+                else:
+                    print("  Duration matching sufficient")
+
+                # Window search + assignment
+                word_weights = compute_word_weights(episodes)
+                n = len(remaining)
+
+                print("  Finding best episode window...")
+                window_start, window_score = find_best_window(remaining, episodes, word_weights)
+                window = episodes[window_start : window_start + n]
+
+                if window:
+                    print(f"  Best window: {window[0].code}–{window[-1].code} (score={window_score:.2f})")
+
+                    # Check if forward-order fallback is needed
+                    use_forward = False
+                    scores_by_window: list[float] = []
+                    for start in range(max(1, len(episodes) - n + 1)):
+                        w = episodes[start : start + n]
+                        if len(w) == n:
+                            mx = _build_score_matrix(remaining, w, word_weights)
+                            a = hungarian_assignment(mx)
+                            scores_by_window.append(sum(mx[i][j] for i, j, _ in a if i < n and j < n))
+
+                    if scores_by_window:
+                        best = max(scores_by_window)
+                        second = sorted(scores_by_window, reverse=True)[1] if len(scores_by_window) > 1 else 0
+                        margin = (best - second) / best if best > 0 else 0
+                        if margin < 0.15 and assume_order and existing_eps:
+                            window = episodes[:n]
+                            print(
+                                f"  Scores indistinct (margin={margin:.0%}), "
+                                f"forward order: {window[0].code}–{window[-1].code}"
+                            )
+                            use_forward = True
+                        elif margin < 0.15:
+                            print(f"  Scores indistinct (margin={margin:.0%}), no prior context — cannot identify")
+                            notify(
+                                f"{series_name}: identification failed",
+                                f"No subtitle/hash/duration signal and no prior disc context.\n"
+                                f"{len(remaining)} file(s) in archive, manual identification needed.",
+                                error=True,
+                            )
+                            remaining = []
+
+                    if use_forward:
+                        for i, f in enumerate(remaining):
+                            if i < len(window):
+                                results[f.path] = MatchResult(
+                                    file=f,
+                                    episode=window[i],
+                                    method="forward order",
+                                )
+                    else:
+                        assignments = assign_episodes(remaining, window, word_weights)
+                        method = "subtitle match" if need_subs else "duration"
+                        for file_idx, ep_idx, score in assignments:
+                            if score >= args.min_score:
+                                f = remaining[file_idx]
+                                results[f.path] = MatchResult(
+                                    file=f,
+                                    episode=window[ep_idx],
+                                    method=method,
+                                    score=score,
+                                )
+
+    # --- Hard-link matched files to library ---
+    unmatched_names: list[str] = []
+    matched_manifest: dict[str, dict] = {}
+
+    lib_series_dir = library_dir / "tv" / sanitize_filename(series_name)
+
+    for f in files:
+        if f.path not in results:
+            unmatched_names.append(f.path.name)
+            continue
+
+        r = results[f.path]
+        title_safe = sanitize_filename(r.episode.title)
+        new_name = f"{r.episode.code} - {title_safe}.mkv" if title_safe else f"{r.episode.code}.mkv"
+        link_path = lib_series_dir / new_name
+
+        if link_path.exists():
+            if link_path.stat().st_ino == f.path.stat().st_ino:
+                print(f"  skip (already linked): {f.path.name} → {new_name}")
+                continue
+            print(f"  conflict: {new_name} exists with different inode")
+            notify(
+                f"{series_name} {r.episode.code}: link conflict",
+                f"Library already has a different copy:\n{link_path}\n\nNew rip: {f.path}\nResolve manually.",
+                error=True,
+            )
+            continue
+
+        action = "would link" if args.dry_run else "link"
+        rel_path = link_path.relative_to(library_dir) if library_dir in link_path.parents else new_name
+        print(f"  {action}: {f.path.name} → {rel_path}  [{r.method}]")
+
+        if not args.dry_run:
+            lib_series_dir.mkdir(parents=True, exist_ok=True)
+            os.link(f.path, link_path)
+
+        matched_manifest[new_name] = {
+            "original": str(f.path),
+            "season": r.episode.season,
+            "episode": r.episode.episode,
+            "title": r.episode.title,
+            "method": r.method,
+            "score": round(r.score, 2),
+        }
+
+    if unmatched_names:
+        print(f"  Unmatched: {unmatched_names}")
+
+    # --- Write manifest ---
+    if not args.dry_run and matched_manifest:
+        manifest = {
+            "series": series_name,
+            "matched": matched_manifest,
+            "unmatched": unmatched_names,
+            "timestamp": datetime.now().isoformat(),
+        }
+        manifest_path = out_dir / ".episode-manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+        print(f"  Manifest written: {manifest_path}")
+
+    # --- Notification ---
+    if not matched_manifest and not unmatched_names:
+        return
+
+    by_method: dict[str, list[MatchResult]] = {}
+    for r in results.values():
+        by_method.setdefault(r.method, []).append(r)
+
+    lines: list[str] = []
+    all_range = _format_ranges(list(results.values()))
+    lines.append(all_range)
+    lines.append("")
+    for method, mrs in sorted(by_method.items()):
+        r_str = _format_ranges(mrs)
+        lines.append(f"{method}: {r_str}")
+    lines.append("")
+    lines.append(f"{len(files)} title(s) → {len(matched_manifest)} linked to library")
+    if unmatched_names:
+        lines.append(f"{len(unmatched_names)} unmapped file(s) in archive")
+
+    body = "\n".join(lines)
+    title = f"{series_name}: episodes linked"
+    print(f"\n{title}\n{body}")
+
+    if unmatched_names:
+        notify(title, body, error=True)
+    else:
+        notify(title, body)
+
+
+if __name__ == "__main__":
+    main()
