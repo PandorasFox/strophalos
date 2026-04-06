@@ -23,13 +23,7 @@ from strophalos.backends.tmdb import fetch_all_episodes
 from strophalos.core.fs import sanitize_filename
 from strophalos.core.mkv import get_mkv_duration
 from strophalos.core.notify import notify
-from strophalos.identify.assignment import (
-    _build_score_matrix,
-    assign_episodes,
-    find_best_window,
-    hungarian_assignment,
-)
-from strophalos.identify.scoring import compute_word_weights
+from strophalos.identify.assignment import assign_episodes, find_best_window
 from strophalos.identify.subtitles import extract_subtitles
 from strophalos.types import Episode, MatchResult, RippedFile
 
@@ -69,15 +63,16 @@ def main() -> None:
     parser.add_argument("--min-score", type=float, default=0.5, help="Minimum score for matching")
     parser.add_argument("--verbose", action="store_true", help="Show OCR text and detailed scoring")
     parser.add_argument(
-        "--no-assume-order",
+        "--search-window",
         action="store_true",
-        help="Don't assume discs are inserted in order (disable forward-order fallback)",
+        help="Search for the best episode window instead of assuming sequential disc order",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Link even when all scores are weak (below confidence threshold)",
     )
     args = parser.parse_args()
-
-    assume_order = os.environ.get("ASSUME_DISC_ORDER", "1").lower() not in ("0", "false", "no")
-    if args.no_assume_order:
-        assume_order = False
 
     out_dir = Path(args.dir)
     if not out_dir.is_dir():
@@ -130,8 +125,8 @@ def main() -> None:
     if not remaining:
         print("  All files identified via hash lookup")
     else:
-        # --- Phase 1+: TMDb + duration + subtitles ---
-        episodes, specials, group_name, tmdb_name = fetch_all_episodes(args.label)
+        # --- Phase 1+: TMDb + duration + reference subtitles ---
+        episodes, specials, group_name, tmdb_name, series_id = fetch_all_episodes(args.label)
         if tmdb_name:
             series_name = tmdb_name
         if not episodes and not tmdb_name:
@@ -165,7 +160,7 @@ def main() -> None:
             episodes = [ep for ep in episodes if (ep.season, ep.episode) not in exclude]
 
             if episodes and remaining:
-                # Duration filter
+                # Duration pre-filter: check if duration alone can solve it
                 need_subs = False
                 for f in remaining:
                     candidates = [
@@ -178,11 +173,16 @@ def main() -> None:
                         need_subs = True
                         break
 
-                if need_subs:
-                    print("  Duration-only matching insufficient, extracting subtitles...")
+                # Fetch reference subs only if duration doesn't fully solve it
+                reference_subs: dict[tuple[int, int], list[tuple[float, str]]] = {}
+                if need_subs and series_id is not None:
+                    reference_subs = opensubtitles.fetch_reference_subs(episodes, series_id)
+
+                if need_subs and reference_subs:
+                    print("  Duration-only matching insufficient, extracting subtitles for reference comparison...")
 
                     def _process_file(f: RippedFile) -> tuple[RippedFile, int]:
-                        f.subtitle_texts = extract_subtitles(f.path, f.duration_seconds)
+                        f.subtitle_texts = extract_subtitles(f.path, f.duration_seconds, full=True)
                         return f, len(f.subtitle_texts)
 
                     with ThreadPoolExecutor(max_workers=min(4, len(remaining))) as pool:
@@ -208,62 +208,51 @@ def main() -> None:
                                 f.subtitle_texts = [
                                     (t, text) for t, text in f.subtitle_texts if text.strip().lower() not in common_cues
                                 ]
-                else:
+                elif not need_subs:
                     print("  Duration matching sufficient")
 
-                # Window search + assignment
-                word_weights = compute_word_weights(episodes)
                 n = len(remaining)
 
-                print("  Finding best episode window...")
-                window_start, window_score = find_best_window(remaining, episodes, word_weights)
-                window = episodes[window_start : window_start + n]
+                if args.search_window:
+                    # Slide window across all candidate episodes to find best fit
+                    print("  Searching for best episode window...")
+                    window_start, window_score = find_best_window(remaining, episodes, reference_subs)
+                    window = episodes[window_start : window_start + n]
+                else:
+                    # Default: next N unlinked episodes (discs ripped in order)
+                    window = episodes[:n]
+
+                if not window:
+                    print("  No candidate episodes remaining")
+                elif len(window) < n:
+                    print(f"  Only {len(window)} episode(s) for {n} file(s) — some will be unmatched")
 
                 if window:
-                    print(f"  Best window: {window[0].code}–{window[-1].code} (score={window_score:.2f})")
+                    print(f"  Window: {window[0].code}–{window[-1].code} ({len(window)} episode(s) for {n} file(s))")
 
-                    # Check if forward-order fallback is needed
-                    use_forward = False
-                    scores_by_window: list[float] = []
-                    for start in range(max(1, len(episodes) - n + 1)):
-                        w = episodes[start : start + n]
-                        if len(w) == n:
-                            mx = _build_score_matrix(remaining, w, word_weights)
-                            a = hungarian_assignment(mx)
-                            scores_by_window.append(sum(mx[i][j] for i, j, _ in a if i < n and j < n))
+                    assignments = assign_episodes(remaining, window, reference_subs)
+                    method = "reference subtitle match" if reference_subs else "duration"
 
-                    if scores_by_window:
-                        best = max(scores_by_window)
-                        second = sorted(scores_by_window, reverse=True)[1] if len(scores_by_window) > 1 else 0
-                        margin = (best - second) / best if best > 0 else 0
-                        if margin < 0.15 and assume_order and existing_eps:
-                            window = episodes[:n]
-                            print(
-                                f"  Scores indistinct (margin={margin:.0%}), "
-                                f"forward order: {window[0].code}–{window[-1].code}"
-                            )
-                            use_forward = True
-                        elif margin < 0.15:
-                            print(f"  Scores indistinct (margin={margin:.0%}), no prior context — cannot identify")
-                            notify(
-                                f"{series_name}: identification failed",
-                                f"No subtitle/hash/duration signal and no prior disc context.\n"
-                                f"{len(remaining)} file(s) in archive, manual identification needed.",
-                                error=True,
-                            )
-                            remaining = []
+                    # Confidence gate: if all scores are weak, refuse to link
+                    # unless --force is set
+                    CONFIDENCE_THRESHOLD = 3.0
+                    scores = [s for _, _, s in assignments]
+                    all_weak = scores and all(s <= CONFIDENCE_THRESHOLD for s in scores)
 
-                    if use_forward:
-                        for i, f in enumerate(remaining):
-                            if i < len(window):
-                                results[f.path] = MatchResult(
-                                    file=f,
-                                    episode=window[i],
-                                    method="forward order",
-                                )
+                    if all_weak and not args.force:
+                        best_score = max(scores) if scores else 0
+                        msg = (
+                            f"All {len(scores)} match scores are weak "
+                            f"(best={best_score:.2f}, threshold={CONFIDENCE_THRESHOLD:.1f}).\n"
+                            f"This may indicate mismatched subtitles or a non-sequential disc.\n"
+                            f"Re-run manually with --force to link anyway, "
+                            f"or try --search-window for non-sequential discs:\n"
+                            f"  identify-episodes --dir {args.dir} --label {args.label} --force\n"
+                            f"  identify-episodes --dir {args.dir} --label {args.label} --search-window"
+                        )
+                        print(f"  {msg}")
+                        notify(f"{series_name}: low confidence, not linking", msg, error=True)
                     else:
-                        assignments = assign_episodes(remaining, window, word_weights)
-                        method = "subtitle match" if need_subs else "duration"
                         for file_idx, ep_idx, score in assignments:
                             if score >= args.min_score:
                                 f = remaining[file_idx]

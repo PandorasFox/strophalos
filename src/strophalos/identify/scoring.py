@@ -1,11 +1,9 @@
-"""Episode title scoring — word weighting, phrase matching, position decay."""
+"""Episode scoring — time-aligned subtitle similarity comparison."""
 
 from __future__ import annotations
 
 import re
-from collections import Counter
-
-from strophalos.types import Episode
+from collections import defaultdict
 
 
 def tokenize(text: str) -> list[str]:
@@ -13,79 +11,92 @@ def tokenize(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", text.lower())
 
 
-def compute_word_weights(episodes: list[Episode]) -> dict[str, float]:
-    """Compute per-word scoring weights. Common words get reduced weight."""
-    n = len(episodes)
-    if n == 0:
-        return {}
-
-    doc_freq: Counter[str] = Counter()
-    for ep in episodes:
-        words = set(tokenize(ep.title))
-        for w in words:
-            doc_freq[w] += 1
-
-    weights: dict[str, float] = {}
-    for word, count in doc_freq.items():
-        weights[word] = 0.1 if count / n > 0.5 else 1.0
-    return weights
+def _normalize_cue(text: str) -> str:
+    """Strip formatting tags, lowercase, collapse whitespace."""
+    text = re.sub(r"<[^>]+>", "", text)  # HTML tags
+    text = re.sub(r"\{[^}]*\}", "", text)  # ASS/SSA tags
+    text = text.lower().strip()
+    return re.sub(r"\s+", " ", text)
 
 
-def position_weight(t: float, duration: float) -> float:
-    """Weight by position in episode. Smooth taper from 1.5x at start to 1.0x by 20%."""
-    if duration <= 0:
-        return 1.0
-    frac = t / duration
-    if frac <= 0.20:
-        return 1.0 + 0.5 * (1.0 - frac / 0.20)
-    if frac >= 0.75:
-        return 0.3
-    return 1.0
+def _bucket_cues(
+    cues: list[tuple[float, str]],
+    bucket_width: float,
+    offset: float = 0.0,
+) -> dict[int, set[str]]:
+    """Group cue words into time buckets.
 
-
-def score_match(
-    episode: Episode,
-    subtitle_texts: list[tuple[float, str]],
-    word_weights: dict[str, float],
-    file_duration: float,
-) -> float:
-    """Score how well subtitle text matches an episode title.
-
-    Each title word is scored at most once, using its best position weight
-    across all subtitle cues. Phrase matching (all discriminating words in a
-    single cue) provides a strong bonus.
+    Returns {bucket_index: set_of_words}. The offset shifts cue timestamps
+    before bucketing (for compensating intro timing differences).
     """
-    title_words = tokenize(episode.title)
-    if not title_words:
+    buckets: dict[int, set[str]] = defaultdict(set)
+    for timestamp, text in cues:
+        adjusted = timestamp + offset
+        if adjusted < 0:
+            continue
+        bucket = int(adjusted // bucket_width)
+        words = tokenize(_normalize_cue(text))
+        buckets[bucket].update(words)
+    return buckets
+
+
+def _jaccard_score(
+    extracted_buckets: dict[int, set[str]],
+    reference_buckets: dict[int, set[str]],
+) -> float:
+    """Compute weighted Jaccard similarity across shared time buckets.
+
+    For each bucket present in both extracted and reference, computes
+    |intersection| / |union| weighted by the number of reference words.
+    Returns the weighted sum divided by total reference words, scaled by 10.
+    """
+    total_ref_words = 0
+    weighted_sum = 0.0
+
+    for bucket_idx, ref_words in reference_buckets.items():
+        if not ref_words:
+            continue
+        n_ref = len(ref_words)
+        total_ref_words += n_ref
+
+        ext_words = extracted_buckets.get(bucket_idx)
+        if not ext_words:
+            continue
+
+        intersection = len(ref_words & ext_words)
+        union = len(ref_words | ext_words)
+        if union > 0:
+            weighted_sum += (intersection / union) * n_ref
+
+    if total_ref_words == 0:
         return 0.0
 
-    # Discriminating words = the ones that actually distinguish episodes
-    disc_words = [w for w in title_words if word_weights.get(w, 1.0) > 0.5]
+    return (weighted_sum / total_ref_words) * 10.0
 
-    # Phrase match: if all discriminating words appear in a single subtitle cue,
-    # that's likely the title card. This is a very strong signal.
-    phrase_bonus = 0.0
-    if disc_words:
-        for timestamp, text in subtitle_texts:
-            cue_words = set(tokenize(text))
-            if all(w in cue_words for w in disc_words):
-                pw = position_weight(timestamp, file_duration)
-                phrase_bonus = max(phrase_bonus, 5.0 * pw)
-                break
 
-    # Per-word scoring: each title word scored once at its best position
-    best_pw: dict[str, float] = {}
-    for timestamp, text in subtitle_texts:
-        sub_words = set(tokenize(text))
-        pw = position_weight(timestamp, file_duration)
-        for word in title_words:
-            if word in sub_words:
-                best_pw[word] = max(best_pw.get(word, 0.0), pw)
+def score_subtitle_similarity(
+    extracted_cues: list[tuple[float, str]],
+    reference_cues: list[tuple[float, str]],
+) -> float:
+    """Score similarity between extracted and reference subtitles.
 
-    word_score = 0.0
-    for word in title_words:
-        if word in best_pw:
-            weight = word_weights.get(word, 1.0)
-            word_score += weight * best_pw[word]
+    Uses time-aligned word-level Jaccard similarity with offset compensation.
+    Tries timing offsets (0, ±5s, ±10s) and returns the best score.
 
-    return word_score + phrase_bonus
+    Returns a score where higher = better match. Scaled so a perfect
+    match on clean text yields ~10.0.
+    """
+    if not extracted_cues or not reference_cues:
+        return 0.0
+
+    bucket_width = 30.0
+    ref_buckets = _bucket_cues(reference_cues, bucket_width)
+
+    best_score = 0.0
+    for offset in (0.0, 5.0, -5.0, 10.0, -10.0):
+        ext_buckets = _bucket_cues(extracted_cues, bucket_width, offset=offset)
+        score = _jaccard_score(ext_buckets, ref_buckets)
+        if score > best_score:
+            best_score = score
+
+    return best_score

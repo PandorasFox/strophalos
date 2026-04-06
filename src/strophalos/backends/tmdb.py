@@ -151,15 +151,15 @@ def fetch_episodes_standard(series_id: int) -> list[Episode]:
     return episodes
 
 
-def fetch_all_episodes(label: str) -> tuple[list[Episode], list[Episode], str | None, str | None]:
+def fetch_all_episodes(label: str) -> tuple[list[Episode], list[Episode], str | None, str | None, int | None]:
     """Fetch all episodes for a series.
 
-    Returns (regular_episodes, specials, group_name, series_name).
+    Returns (regular_episodes, specials, group_name, series_name, series_id).
     Regular episodes sorted by (season, episode); specials sorted separately.
     """
     result = search_series(label)
     if not result:
-        return [], [], None, None
+        return [], [], None, None, None
 
     series_id, series_name = result
 
@@ -174,7 +174,7 @@ def fetch_all_episodes(label: str) -> tuple[list[Episode], list[Episode], str | 
     regular = sorted([ep for ep in eps if ep.season > 0], key=lambda e: (e.season, e.episode))
     specials = sorted([ep for ep in eps if ep.season == 0], key=lambda e: e.episode)
 
-    return regular, specials, group_name, series_name
+    return regular, specials, group_name, series_name, series_id
 
 
 # ---------------------------------------------------------------------------

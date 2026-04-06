@@ -96,6 +96,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         patch \
     && pip3 install --break-system-packages pgsrip \
+    && pip3 install --break-system-packages --force-reinstall --no-deps opencv-python-headless \
     && git clone --depth 1 https://github.com/whipper-team/whipper.git /tmp/whipper \
     && cd /tmp/whipper \
     && patch -p1 < /tmp/ambiguous-release.patch \

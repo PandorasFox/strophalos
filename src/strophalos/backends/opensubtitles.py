@@ -1,4 +1,4 @@
-"""OpenSubtitles v2 API — hash-based episode identification."""
+"""OpenSubtitles v2 API — hash-based identification and reference subtitle fetching."""
 
 from __future__ import annotations
 
@@ -6,10 +6,12 @@ import json
 import os
 import struct
 import time
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from strophalos.core.http import get_json
+from strophalos.core.http import get_json, post_json
 
 OPENSUBTITLES_CONFIG = Path("/config/opensubtitles.json")
 OPENSUBTITLES_API_BASE = "https://api.opensubtitles.com/api/v1"
@@ -190,3 +192,218 @@ def identify(mkv_files: list[Path]) -> dict[Path, tuple[int, int, str]] | None:
         print("  OpenSubtitles: no files identified via hash lookup")
 
     return results if results else None
+
+
+# ---------------------------------------------------------------------------
+# Reference subtitle fetching — search, download, and cache
+# ---------------------------------------------------------------------------
+
+SUBTITLE_CACHE_DIR = Path("/config/subtitle-cache")
+SUBTITLE_CACHE_INDEX = SUBTITLE_CACHE_DIR / "index.json"
+NEGATIVE_CACHE_TTL_DAYS = 30
+
+
+def _api_post(
+    endpoint: str,
+    data: dict[str, Any],
+    config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Make a POST request to the OpenSubtitles v2 API."""
+    api_key = config["api_key"]
+    token = config["token"]
+
+    url = f"{OPENSUBTITLES_API_BASE}{endpoint}"
+    return post_json(
+        url,
+        data,
+        headers={
+            "Api-Key": api_key,
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "strophalos v1.0",
+        },
+        timeout=15,
+    )
+
+
+def _load_cache_index() -> dict[str, Any]:
+    """Load the subtitle cache index. Returns empty dict if missing."""
+    if not SUBTITLE_CACHE_INDEX.exists():
+        return {}
+    try:
+        return json.loads(SUBTITLE_CACHE_INDEX.read_text())
+    except Exception:
+        return {}
+
+
+def _save_cache_index(index: dict[str, Any]) -> None:
+    """Write the subtitle cache index to disk."""
+    SUBTITLE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    SUBTITLE_CACHE_INDEX.write_text(json.dumps(index, indent=2))
+
+
+def _cache_key(series_id: int, season: int, episode: int) -> str:
+    return f"tmdb_{series_id}_s{season:02d}e{episode:02d}"
+
+
+def _is_negative_expired(entry: dict[str, Any]) -> bool:
+    """Check if a negative cache entry has expired (>30 days old)."""
+    fetched = entry.get("fetched_at", "")
+    if not fetched:
+        return True
+    try:
+        fetched_dt = datetime.fromisoformat(fetched)
+        age = datetime.now(timezone.utc) - fetched_dt
+        return age.days > NEGATIVE_CACHE_TTL_DAYS
+    except Exception:
+        return True
+
+
+def _search_episode_subs(
+    tmdb_id: int,
+    season: int,
+    episode: int,
+    config: dict[str, Any],
+) -> int | None:
+    """Search for the best subtitle file for an episode. Returns file_id or None."""
+    data = _api_get(
+        "/subtitles",
+        {
+            "tmdb_id": str(tmdb_id),
+            "season_number": str(season),
+            "episode_number": str(episode),
+            "languages": "en",
+        },
+        config,
+    )
+    if not data:
+        return None
+
+    entries = data.get("data", [])
+    if not entries:
+        return None
+
+    # Pick the file with the highest download count, preferring .srt
+    best_file_id: int | None = None
+    best_downloads = -1
+    for entry in entries:
+        attrs = entry.get("attributes", {})
+        for f in attrs.get("files", []):
+            file_id = f.get("file_id")
+            downloads = f.get("cd_number", 0)  # fallback
+            # Use the entry-level download_count as proxy
+            dl_count = attrs.get("download_count", 0)
+            if file_id and dl_count > best_downloads:
+                best_downloads = dl_count
+                best_file_id = file_id
+
+    return best_file_id
+
+
+def _download_subtitle(file_id: int, config: dict[str, Any]) -> str | None:
+    """Download a subtitle file. Returns .srt content as string, or None."""
+    resp = _api_post("/download", {"file_id": file_id}, config)
+    if not resp:
+        return None
+
+    link = resp.get("link")
+    if not link:
+        print(f"  OpenSubtitles: download response missing link for file_id={file_id}")
+        return None
+
+    try:
+        req = urllib.request.Request(link, headers={"User-Agent": "strophalos v1.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        print(f"  OpenSubtitles: failed to download subtitle file: {e}")
+        return None
+
+
+def fetch_reference_subs(
+    episodes: list[Any],
+    series_id: int,
+) -> dict[tuple[int, int], list[tuple[float, str]]]:
+    """Fetch reference subtitles for candidate episodes.
+
+    Returns {(season, episode): [(timestamp_seconds, text), ...]} for episodes
+    where subtitles were found. Uses a local cache to avoid redundant downloads.
+    """
+    from strophalos.identify.subtitles import parse_srt
+
+    config = _load_config()
+    if config is None:
+        return {}
+
+    if not _token_valid(config):
+        print("  OpenSubtitles: token invalid, skipping reference subtitle fetch")
+        return {}
+
+    cache_index = _load_cache_index()
+    results: dict[tuple[int, int], list[tuple[float, str]]] = {}
+    api_calls_made = 0
+
+    print(f"  OpenSubtitles: fetching reference subs for {len(episodes)} episode(s)...")
+
+    for ep in episodes:
+        key = _cache_key(series_id, ep.season, ep.episode)
+        srt_path = SUBTITLE_CACHE_DIR / f"{key}.srt"
+
+        # Check cache
+        if key in cache_index:
+            entry = cache_index[key]
+            if entry.get("not_found"):
+                if not _is_negative_expired(entry):
+                    continue
+                # Expired negative — re-query
+            else:
+                # Positive cache hit — read from disk
+                if srt_path.exists():
+                    cues = parse_srt(srt_path.read_text(errors="replace"))
+                    if cues:
+                        results[(ep.season, ep.episode)] = cues
+                    continue
+
+        # Rate limit
+        if api_calls_made > 0:
+            time.sleep(1.0)
+
+        # Search
+        file_id = _search_episode_subs(series_id, ep.season, ep.episode, config)
+        api_calls_made += 1
+
+        if file_id is None:
+            cache_index[key] = {
+                "not_found": True,
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+            }
+            print(f"    {ep.code}: no subs available")
+            continue
+
+        # Download
+        time.sleep(1.0)
+        srt_content = _download_subtitle(file_id, config)
+        api_calls_made += 1
+
+        if srt_content is None:
+            continue
+
+        # Cache to disk
+        SUBTITLE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        srt_path.write_text(srt_content)
+        cache_index[key] = {
+            "file_id": file_id,
+            "language": "en",
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "not_found": False,
+        }
+
+        cues = parse_srt(srt_content)
+        if cues:
+            results[(ep.season, ep.episode)] = cues
+            print(f"    {ep.code}: {len(cues)} cue(s) cached")
+        else:
+            print(f"    {ep.code}: downloaded but no parseable cues")
+
+    _save_cache_index(cache_index)
+    print(f"  OpenSubtitles: {len(results)}/{len(episodes)} episode(s) with reference subs")
+    return results

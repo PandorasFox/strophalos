@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from strophalos.identify.scoring import score_match
+from strophalos.identify.scoring import score_subtitle_similarity
 from strophalos.types import Episode, RippedFile
 
 
@@ -88,7 +88,7 @@ def hungarian_assignment(score_matrix: list[list[float]]) -> list[tuple[int, int
 def _build_score_matrix(
     files: list[RippedFile],
     window: list[Episode],
-    word_weights: dict[str, float],
+    reference_subs: dict[tuple[int, int], list[tuple[float, str]]],
 ) -> list[list[float]]:
     """Build the N x M score matrix for files against a window of episodes."""
     matrix: list[list[float]] = []
@@ -98,7 +98,8 @@ def _build_score_matrix(
             dur_score = 0.0
             if ep.runtime_seconds > 0:
                 dur_score = max(0, 1.0 - abs(f.duration_seconds - ep.runtime_seconds) / ep.runtime_seconds) * 2.0
-            sub_score = score_match(ep, f.subtitle_texts, word_weights, f.duration_seconds)
+            ref = reference_subs.get((ep.season, ep.episode), [])
+            sub_score = score_subtitle_similarity(f.subtitle_texts, ref) if ref and f.subtitle_texts else 0.0
             row.append(dur_score + sub_score)
         matrix.append(row)
     return matrix
@@ -107,7 +108,7 @@ def _build_score_matrix(
 def find_best_window(
     files: list[RippedFile],
     episodes: list[Episode],
-    word_weights: dict[str, float],
+    reference_subs: dict[tuple[int, int], list[tuple[float, str]]],
 ) -> tuple[int, float]:
     """Slide a window of len(files) across episodes, return (start_idx, best_score).
 
@@ -124,7 +125,7 @@ def find_best_window(
 
     for start in range(m - n + 1):
         window = episodes[start : start + n]
-        matrix = _build_score_matrix(files, window, word_weights)
+        matrix = _build_score_matrix(files, window, reference_subs)
         assignments = hungarian_assignment(matrix)
         total = sum(matrix[i][j] for i, j, _ in assignments if i < n and j < n)
 
@@ -138,13 +139,13 @@ def find_best_window(
 def assign_episodes(
     files: list[RippedFile],
     window_episodes: list[Episode],
-    word_weights: dict[str, float],
+    reference_subs: dict[tuple[int, int], list[tuple[float, str]]],
 ) -> list[tuple[int, int, float]]:
     """Assign files to episodes within a window. Returns (file_idx, ep_idx, score)."""
     n = len(files)
     m = len(window_episodes)
 
-    matrix = _build_score_matrix(files, window_episodes, word_weights)
+    matrix = _build_score_matrix(files, window_episodes, reference_subs)
 
     # Try forward ordering: bonus for maintaining disc order = episode order
     forward_matrix = [row[:] for row in matrix]

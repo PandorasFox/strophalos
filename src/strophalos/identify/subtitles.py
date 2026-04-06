@@ -11,7 +11,7 @@ from strophalos.backends.whisper import transcribe
 from strophalos.core.mkv import list_subtitle_tracks, select_best_track
 
 
-def _parse_srt(srt_text: str) -> list[tuple[float, str]]:
+def parse_srt(srt_text: str) -> list[tuple[float, str]]:
     """Parse SRT format into (timestamp_seconds, text) pairs."""
     results: list[tuple[float, str]] = []
     for match in re.finditer(r"(\d+):(\d+):([\d,]+)\s*-->.*?\n(.*?)(?:\n\n|\Z)", srt_text, re.DOTALL):
@@ -24,11 +24,12 @@ def _parse_srt(srt_text: str) -> list[tuple[float, str]]:
     return results
 
 
-def extract_subtitles(mkv_path: Path, duration: float) -> list[tuple[float, str]]:
+def extract_subtitles(mkv_path: Path, duration: float, *, full: bool = False) -> list[tuple[float, str]]:
     """Extract subtitle text from an MKV.
 
     Tries embedded subs (text or PGS+OCR), falls back to Whisper transcription.
-    Returns (timestamp_seconds, text) pairs filtered to first 25% of duration.
+    Returns (timestamp_seconds, text) pairs. When full=False (default), filters
+    to the first 25% of duration; when full=True, returns all cues.
     """
     tracks = list_subtitle_tracks(mkv_path)
     track = select_best_track(tracks)
@@ -66,7 +67,7 @@ def extract_subtitles(mkv_path: Path, duration: float) -> list[tuple[float, str]
                     if line:
                         results.append((ts, line))
             else:
-                results = _parse_srt(text)
+                results = parse_srt(text)
         else:
             # PGS subs: extract .sup then OCR via pgsrip
             sup_path = sub_path.with_suffix(".sup")
@@ -96,9 +97,9 @@ def extract_subtitles(mkv_path: Path, duration: float) -> list[tuple[float, str]
             if not srt_path.exists():
                 return []
 
-            results = _parse_srt(srt_path.read_text(errors="replace"))
+            results = parse_srt(srt_path.read_text(errors="replace"))
 
-    if cutoff > 0:
+    if not full and cutoff > 0:
         results = [(t, text) for t, text in results if t <= cutoff]
 
     # If embedded subs yielded nothing, try Whisper

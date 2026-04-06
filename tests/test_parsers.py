@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from strophalos.backends.tmdb import clean_movie_label
 from strophalos.core.fs import sanitize_filename
-from strophalos.identify.subtitles import _parse_srt
+from strophalos.identify.subtitles import parse_srt
 from strophalos.ripper.scan import (
     _parse_size,
     detect_media_type,
@@ -182,28 +182,28 @@ class TestCleanMovieLabel:
 
 
 # ---------------------------------------------------------------------------
-# _parse_srt
+# parse_srt
 # ---------------------------------------------------------------------------
 
 
 class TestParseSrt:
     def test_basic_srt(self):
         srt = "1\n00:01:30,500 --> 00:01:33,000\nHello World\n\n2\n00:02:00,000 --> 00:02:03,500\nSecond line\n\n"
-        results = _parse_srt(srt)
+        results = parse_srt(srt)
         assert len(results) == 2
         assert results[0] == (90.5, "Hello World")
         assert results[1] == (120.0, "Second line")
 
     def test_multiline_cue(self):
         srt = "1\n00:00:10,000 --> 00:00:15,000\nLine one\nLine two\n\n"
-        results = _parse_srt(srt)
+        results = parse_srt(srt)
         assert len(results) == 1
         assert results[0][1] == "Line one Line two"
 
     def test_html_tags_stripped(self):
         srt = "1\n00:00:05,000 --> 00:00:10,000\n<i>Italic text</i>\n\n"
-        results = _parse_srt(srt)
+        results = parse_srt(srt)
         assert results[0][1] == "Italic text"
 
     def test_empty_srt(self):
-        assert _parse_srt("") == []
+        assert parse_srt("") == []

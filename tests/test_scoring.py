@@ -1,14 +1,11 @@
-"""Tests for episode title scoring — word weighting, phrase matching, position decay."""
+"""Tests for episode scoring — time-aligned subtitle similarity comparison."""
 
 from __future__ import annotations
 
 from strophalos.identify.scoring import (
-    compute_word_weights,
-    position_weight,
-    score_match,
+    score_subtitle_similarity,
     tokenize,
 )
-from strophalos.types import Episode
 
 # ---------------------------------------------------------------------------
 # tokenize
@@ -36,137 +33,99 @@ class TestTokenize:
 
 
 # ---------------------------------------------------------------------------
-# compute_word_weights
+# score_subtitle_similarity
 # ---------------------------------------------------------------------------
 
 
-class TestComputeWordWeights:
-    def test_empty(self):
-        assert compute_word_weights([]) == {}
+def _make_cues(texts: list[tuple[float, str]]) -> list[tuple[float, str]]:
+    """Helper to build cue lists."""
+    return texts
 
-    def test_all_unique(self):
-        episodes = [
-            Episode(1, 1, "Wolf and Best Clothes", 0),
-            Episode(1, 2, "Rain and Distant Past", 0),
+
+class TestScoreSubtitleSimilarity:
+    def test_identical_subs(self):
+        """Identical cues should produce a high score."""
+        cues = [
+            (10.0, "Hello there, welcome to the show"),
+            (40.0, "The wolf runs through the forest"),
+            (70.0, "I need to find the merchant"),
+            (100.0, "We should leave before dawn"),
         ]
-        weights = compute_word_weights(episodes)
-        # "and" appears in both (2/2 = 100% > 50%) → low weight
-        assert weights["and"] == 0.1
-        # "wolf" appears in 1/2 = 50%, not > 50% → full weight
-        assert weights["wolf"] == 1.0
-        assert weights["rain"] == 1.0
+        score = score_subtitle_similarity(cues, cues)
+        assert score > 8.0  # near-perfect match, scaled by 10
 
-    def test_series_word_downweighted(self):
-        """A word appearing in >50% of episode titles should be downweighted."""
-        episodes = [
-            Episode(1, 1, "The One Where Ross Gets High", 0),
-            Episode(1, 2, "The One Where Rachel Smokes", 0),
-            Episode(1, 3, "The One with the Holiday Armadillo", 0),
+    def test_no_overlap(self):
+        """Completely different text at same timestamps should score near zero."""
+        extracted = [
+            (10.0, "alpha bravo charlie delta"),
+            (40.0, "echo foxtrot golf hotel"),
         ]
-        weights = compute_word_weights(episodes)
-        # "the", "one" appear in all 3 → downweighted
-        assert weights["the"] == 0.1
-        assert weights["one"] == 0.1
-        # "ross" appears in 1/3 → full weight
-        assert weights["ross"] == 1.0
-        # "where" appears in 2/3 → downweighted
-        assert weights["where"] == 0.1
+        reference = [
+            (10.0, "one two three four"),
+            (40.0, "five six seven eight"),
+        ]
+        score = score_subtitle_similarity(extracted, reference)
+        assert score < 0.5
 
-    def test_single_episode(self):
-        """With one episode, every word appears in 100% → all downweighted."""
-        episodes = [Episode(1, 1, "Pilot Episode", 0)]
-        weights = compute_word_weights(episodes)
-        assert weights["pilot"] == 0.1
-        assert weights["episode"] == 0.1
+    def test_ocr_noise(self):
+        """OCR'd text with character substitutions should still score reasonably."""
+        reference = [
+            (10.0, "The wolf and the merchant travel north"),
+            (40.0, "I will buy your wheat at a fair price"),
+            (70.0, "The church controls the northern trade routes"),
+        ]
+        # Simulated OCR errors: l→I, 0→O, missing chars
+        extracted = [
+            (10.0, "The woIf and the merchant traveI north"),
+            (40.0, "I wiII buy your wheat at a fair price"),
+            (70.0, "The church controIs the northern trade routes"),
+        ]
+        clean_score = score_subtitle_similarity(reference, reference)
+        noisy_score = score_subtitle_similarity(extracted, reference)
+        # OCR noise should still get a reasonable portion of the clean score
+        assert noisy_score > clean_score * 0.5
 
+    def test_timing_offset(self):
+        """Shifted cues should still score well due to offset compensation."""
+        reference = [
+            (30.0, "The wolf runs through the forest"),
+            (60.0, "I need to find the merchant guild"),
+            (90.0, "We should leave before dawn"),
+        ]
+        # Same text shifted by +8 seconds (within ±10s compensation)
+        shifted = [
+            (38.0, "The wolf runs through the forest"),
+            (68.0, "I need to find the merchant guild"),
+            (98.0, "We should leave before dawn"),
+        ]
+        aligned_score = score_subtitle_similarity(reference, reference)
+        shifted_score = score_subtitle_similarity(shifted, reference)
+        # Should recover most of the score via offset compensation
+        assert shifted_score > aligned_score * 0.7
 
-# ---------------------------------------------------------------------------
-# position_weight
-# ---------------------------------------------------------------------------
+    def test_wrong_episode(self):
+        """Subs from episode 1 should score much higher against ep1 ref than ep2 ref."""
+        ep1_subs = [
+            (10.0, "The merchant caravan arrives at dawn"),
+            (40.0, "Silver coins for your finest wheat"),
+            (70.0, "The northern roads are dangerous"),
+        ]
+        ep2_ref = [
+            (10.0, "The festival begins at midnight"),
+            (40.0, "Dancing under the harvest moon"),
+            (70.0, "The southern kingdom sends envoys"),
+        ]
+        score_correct = score_subtitle_similarity(ep1_subs, ep1_subs)
+        score_wrong = score_subtitle_similarity(ep1_subs, ep2_ref)
+        assert score_correct > score_wrong * 3
 
+    def test_empty_extracted(self):
+        ref = [(10.0, "Some text")]
+        assert score_subtitle_similarity([], ref) == 0.0
 
-class TestPositionWeight:
-    def test_zero_duration(self):
-        assert position_weight(0.0, 0.0) == 1.0
+    def test_empty_reference(self):
+        ext = [(10.0, "Some text")]
+        assert score_subtitle_similarity(ext, []) == 0.0
 
-    def test_very_start(self):
-        # t=0 should be 1.5x
-        assert position_weight(0.0, 1000.0) == 1.5
-
-    def test_at_20_percent(self):
-        # At exactly 20%, should be 1.0 (taper ends)
-        assert position_weight(200.0, 1000.0) == 1.0
-
-    def test_at_10_percent(self):
-        # Halfway through taper: 1.0 + 0.5 * (1.0 - 0.5) = 1.25
-        assert position_weight(100.0, 1000.0) == 1.25
-
-    def test_middle(self):
-        # Between 20% and 75% → flat 1.0
-        assert position_weight(500.0, 1000.0) == 1.0
-
-    def test_late(self):
-        # >= 75% → 0.3
-        assert position_weight(800.0, 1000.0) == 0.3
-
-    def test_exactly_75_percent(self):
-        assert position_weight(750.0, 1000.0) == 0.3
-
-
-# ---------------------------------------------------------------------------
-# score_match
-# ---------------------------------------------------------------------------
-
-
-class TestScoreMatch:
-    def _ep(self, title: str) -> Episode:
-        return Episode(1, 1, title, runtime_seconds=1400)
-
-    def test_no_title_words(self):
-        assert score_match(self._ep(""), [], {}, 1400) == 0.0
-
-    def test_no_subtitle_text(self):
-        assert score_match(self._ep("Some Title"), [], {}, 1400) == 0.0
-
-    def test_phrase_match_bonus(self):
-        """All discriminating words in a single cue should trigger phrase bonus."""
-        ep = self._ep("The One Where Ross Gets High")
-        weights = {"the": 0.1, "one": 0.1, "where": 0.1, "ross": 1.0, "gets": 1.0, "high": 1.0}
-        # Phrase match: all disc words (ross, gets, high) in one cue
-        subs = [(100.0, "Ross gets high at the party")]
-        score = score_match(ep, subs, weights, 1400)
-        # Should include phrase bonus (5.0 * position_weight) + word scores
-        assert score > 5.0
-
-    def test_no_phrase_match_lower_score(self):
-        """Words scattered across cues should score lower than a phrase match."""
-        ep = self._ep("The One Where Ross Gets High")
-        weights = {"the": 0.1, "one": 0.1, "where": 0.1, "ross": 1.0, "gets": 1.0, "high": 1.0}
-        # Phrase match in one cue
-        phrase_subs = [(100.0, "Ross gets high at the party")]
-        # Words in separate cues (no phrase match)
-        scattered_subs = [(100.0, "Ross enters the room"), (200.0, "He gets the cookie"), (300.0, "Feeling high")]
-        phrase_score = score_match(ep, phrase_subs, weights, 1400)
-        scattered_score = score_match(ep, scattered_subs, weights, 1400)
-        assert phrase_score > scattered_score
-
-    def test_common_words_downweighted(self):
-        """Common words (weight=0.1) should contribute less than discriminating ones."""
-        ep = self._ep("the big test")
-        # "the" is common, "big" and "test" are discriminating
-        weights = {"the": 0.1, "big": 1.0, "test": 1.0}
-        subs = [(100.0, "the big test is today")]
-        score = score_match(ep, subs, weights, 1400)
-        # The phrase bonus uses disc_words (big, test) — both present in one cue
-        # Word scores: the=0.1*pw, big=1.0*pw, test=1.0*pw
-        assert score > 5.0  # phrase bonus fires
-
-    def test_early_cue_scores_higher(self):
-        """A word appearing early in the file should score higher than appearing late."""
-        ep = self._ep("target")
-        weights = {"target": 1.0}
-        early_subs = [(50.0, "target acquired")]  # ~3.5% into a 1400s file → pw ≈ 1.41
-        late_subs = [(1200.0, "target acquired")]  # ~85% → pw = 0.3
-        early_score = score_match(ep, early_subs, weights, 1400)
-        late_score = score_match(ep, late_subs, weights, 1400)
-        assert early_score > late_score
+    def test_both_empty(self):
+        assert score_subtitle_similarity([], []) == 0.0
