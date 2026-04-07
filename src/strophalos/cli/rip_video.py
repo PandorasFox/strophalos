@@ -1,7 +1,7 @@
 """CLI entry point for rip-video — smart video disc ripper.
 
 Scans disc, classifies content (movie/TV/music), rips selected titles,
-and outputs STROPHALOS_* metadata lines for auto-rip.sh to parse.
+and outputs STROPHALOS_* metadata lines for backward compatibility.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import os
 
 from strophalos.ripper.classify import classify_disc
 from strophalos.ripper.disc_id import compute_disc_id
+from strophalos.ripper.result import RipResult
 from strophalos.ripper.rip import rip_titles
 from strophalos.ripper.scan import (
     detect_media_type,
@@ -22,16 +23,15 @@ from strophalos.ripper.scan import (
 )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Smart video disc ripper")
-    parser.add_argument("--drive", type=int, default=0, help="MakeMKV drive ID")
-    parser.add_argument("--output", default="/media/archive", help="Archive base directory")
-    parser.add_argument("--label", default=None, help="Disc volume label (DRV_LABEL) for directory naming")
-    parser.add_argument("--dry-run", action="store_true", help="Scan and classify only")
-    args = parser.parse_args()
-
-    print(f"Scanning disc in drive {args.drive}...")
-    disc_label, titles, disc_info = scan_disc(args.drive)
+def rip_video_disc(
+    drive: int,
+    label: str | None = None,
+    output: str = "/media/archive",
+    dry_run: bool = False,
+) -> RipResult | None:
+    """Core rip-video logic. Returns structured result or None on failure."""
+    print(f"Scanning disc in drive {drive}...")
+    disc_label, titles, disc_info = scan_disc(drive)
     print(f"Disc label: {disc_label}")
     print(f"Found {len(titles)} title(s)")
 
@@ -62,13 +62,20 @@ def main() -> None:
     device = os.environ.get("DEVICE", "/dev/sr1")
     disc_id = compute_disc_id(media_type, device)
 
-    if args.dry_run:
+    if dry_run:
         print("\n[dry-run] Would rip the above titles.")
-        return
+        return RipResult(
+            output_dir="",
+            disc_type=disc_type,
+            media_type=media_type,
+            title_count=len(to_rip),
+            disc_id=disc_id,
+            label=label or disc_label or "unknown_disc",
+        )
 
     content_type = {"tv": "tv", "music": "music"}.get(disc_type, "movies")
-    dir_label = args.label or disc_label or "unknown_disc"
-    label_dir = os.path.join(args.output, content_type, "rips", media_type, dir_label)
+    dir_label = label or disc_label or "unknown_disc"
+    label_dir = os.path.join(output, content_type, "rips", media_type, dir_label)
 
     # Auto-increment disc number
     disc_num = 1
@@ -77,7 +84,7 @@ def main() -> None:
     out_dir = os.path.join(label_dir, f"disc{disc_num}")
 
     print(f"\nRipping {len(to_rip)} title(s) to {out_dir}...")
-    rip_titles(args.drive, to_rip, out_dir)
+    rip_titles(drive, to_rip, out_dir)
 
     # Persist disc ID in output directory
     if disc_id:
@@ -95,13 +102,34 @@ def main() -> None:
         except Exception:
             pass
 
-    # STROPHALOS_* output protocol — auto-rip.sh parses these
-    print(f"STROPHALOS_OUTPUT_DIR={out_dir}")
-    print(f"STROPHALOS_DISC_TYPE={disc_type}")
-    print(f"STROPHALOS_MEDIA_TYPE={media_type}")
-    print(f"STROPHALOS_TITLE_COUNT={len(to_rip)}")
-    if disc_id:
-        print(f"STROPHALOS_DISC_ID={disc_id}")
+    return RipResult(
+        output_dir=out_dir,
+        disc_type=disc_type,
+        media_type=media_type,
+        title_count=len(to_rip),
+        disc_id=disc_id,
+        label=dir_label,
+    )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Smart video disc ripper")
+    parser.add_argument("--drive", type=int, default=0, help="MakeMKV drive ID")
+    parser.add_argument("--output", default="/media/archive", help="Archive base directory")
+    parser.add_argument("--label", default=None, help="Disc volume label (DRV_LABEL) for directory naming")
+    parser.add_argument("--dry-run", action="store_true", help="Scan and classify only")
+    args = parser.parse_args()
+
+    result = rip_video_disc(args.drive, args.label, args.output, args.dry_run)
+
+    if result and not args.dry_run:
+        # STROPHALOS_* output protocol — backward compatibility
+        print(f"STROPHALOS_OUTPUT_DIR={result.output_dir}")
+        print(f"STROPHALOS_DISC_TYPE={result.disc_type}")
+        print(f"STROPHALOS_MEDIA_TYPE={result.media_type}")
+        print(f"STROPHALOS_TITLE_COUNT={result.title_count}")
+        if result.disc_id:
+            print(f"STROPHALOS_DISC_ID={result.disc_id}")
     print("Done.")
 
 

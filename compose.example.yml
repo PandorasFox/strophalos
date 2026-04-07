@@ -4,6 +4,7 @@ services:
     container_name: strophalos
     restart: unless-stopped
     environment:
+      - STROPHALOS_MODE=full  # full|rip|scan|probe|identify
       - DEVICE=/dev/sr1
       - POLL_INTERVAL=5
       - EJECT_ON_COMPLETE=1

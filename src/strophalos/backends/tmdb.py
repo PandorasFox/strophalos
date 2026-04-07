@@ -182,8 +182,15 @@ def fetch_all_episodes(label: str) -> tuple[list[Episode], list[Episode], str | 
 # ---------------------------------------------------------------------------
 
 
-def score_title_search(disc_label: str | None) -> tuple[float, float]:
+def score_title_search(
+    disc_label: str | None,
+    durations: dict[int, int] | None = None,
+) -> tuple[float, float]:
     """Query TMDb for the disc title. Returns (movie_boost, tv_boost).
+
+    If durations are provided and TMDb returns a movie result with a runtime,
+    checks if any title's duration matches the movie runtime (within 5%).
+    A runtime match is a strong movie signal.
 
     Requires TMDB_API_KEY env var; returns (0, 0) if unset or on failure.
     """
@@ -214,9 +221,38 @@ def score_title_search(disc_label: str | None) -> tuple[float, float]:
     tv_count = types.count("tv")
     movie_count = types.count("movie")
 
-    if tv_count > movie_count:
-        return 0.0, 0.3
-    elif movie_count > tv_count:
-        return 0.3, 0.0
+    movie_boost = 0.0
+    tv_boost = 0.0
 
-    return 0.0, 0.0
+    if tv_count > movie_count:
+        tv_boost = 0.3
+    elif movie_count > tv_count:
+        movie_boost = 0.3
+
+    # Runtime matching: if top result is a movie, check if any title matches
+    if durations and movie_count > 0:
+        for r in top:
+            if r.get("media_type") != "movie":
+                continue
+            # Fetch movie details for runtime
+            movie_id = r.get("id")
+            if not movie_id:
+                continue
+            detail = _tmdb_get(f"/movie/{movie_id}")
+            if not detail:
+                continue
+            runtime_min = detail.get("runtime")
+            if not runtime_min:
+                continue
+            runtime_sec = runtime_min * 60
+            # Check if any title duration matches within 5%
+            for tid, dur in durations.items():
+                if runtime_sec > 0 and abs(dur - runtime_sec) / runtime_sec < 0.05:
+                    title_name = r.get("title", "?")
+                    print(f"  TMDb: runtime match — title {tid} ({dur}s) ≈ {title_name} ({runtime_sec}s)")
+                    movie_boost = max(movie_boost, 0.6)
+                    break
+            if movie_boost >= 0.6:
+                break
+
+    return movie_boost, tv_boost

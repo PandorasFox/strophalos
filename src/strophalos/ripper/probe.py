@@ -76,6 +76,8 @@ def _mount_disc(device: str) -> str | None:
     """Mount a disc read-only. Returns mount point or None.
 
     Tries UDF (Blu-ray), then ISO 9660 (data), then auto.
+    Defensive umount between attempts — a failed UDF mount can leave
+    the device/mount point in a state that blocks subsequent attempts.
     Caller MUST call _unmount() when done.
     """
     mount_point = tempfile.mkdtemp(prefix="strophalos-probe-")
@@ -90,6 +92,12 @@ def _mount_disc(device: str) -> str | None:
         if result.returncode == 0:
             return mount_point
 
+        print(f"  Probe: mount -t {fs_type} failed", flush=True)
+
+        # Clean up after failed attempt — a partial/stale mount can block
+        # the next filesystem type from succeeding.
+        subprocess.run(["umount", mount_point], capture_output=True, timeout=5)
+
     os.rmdir(mount_point)
     return None
 
@@ -100,6 +108,20 @@ def _unmount(mount_point: str) -> None:
         os.rmdir(mount_point)
     except OSError:
         pass
+
+
+def _get_disc_label(device: str) -> str:
+    """Get filesystem label via blkid. Works without udev (unlike lsblk)."""
+    try:
+        result = subprocess.run(
+            ["blkid", "-o", "value", "-s", "LABEL", device],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return ""
 
 
 def _has_dir(mount_point: str, name: str) -> bool:
@@ -149,8 +171,8 @@ def probe_disc(device: str) -> ProbeResult:
             try:
                 contents = os.listdir(mount_point)
                 if contents:
-                    print(f"  Probe: audio+data disc ({len(contents)} data entries)")
-                    label = dvd_label  # empty, but that's fine
+                    label = _get_disc_label(device)
+                    print(f"  Probe: audio+data disc ({len(contents)} data entries), label='{label}'")
                     return ProbeResult(
                         disc_type="audio+data", label=label, disc_id=disc_id, has_audio=True, has_data=True
                     )
@@ -166,34 +188,13 @@ def probe_disc(device: str) -> ProbeResult:
     if mount_point is not None:
         try:
             if _has_dir(mount_point, "BDMV"):
-                # Read label from lsblk (kernel cache, safe after mount)
-                label = ""
-                try:
-                    result = subprocess.run(
-                        ["lsblk", "-dno", "LABEL", device],
-                        capture_output=True,
-                        text=True,
-                        timeout=5,
-                    )
-                    label = result.stdout.strip()
-                except Exception:
-                    pass
+                label = _get_disc_label(device)
                 print(f"  Probe: Blu-ray detected, label='{label}'")
                 return ProbeResult(disc_type="bluray", label=label, disc_id="", has_audio=False, has_data=True)
 
             contents = os.listdir(mount_point)
             if contents:
-                label = ""
-                try:
-                    result = subprocess.run(
-                        ["lsblk", "-dno", "LABEL", device],
-                        capture_output=True,
-                        text=True,
-                        timeout=5,
-                    )
-                    label = result.stdout.strip()
-                except Exception:
-                    pass
+                label = _get_disc_label(device)
                 print(f"  Probe: data disc ({len(contents)} entries), label='{label}'")
                 return ProbeResult(disc_type="data", label=label, disc_id="", has_audio=False, has_data=True)
         finally:

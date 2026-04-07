@@ -104,16 +104,12 @@ def _flatten_multi_disc_dirs(output: Path) -> None:
             pass
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="CD ripper — whipper with multi-disc detection")
-    parser.add_argument("-d", "--device", default="/dev/sr1", help="CD drive device")
-    parser.add_argument("-o", "--output", default="/output-cd", help="Output directory")
-    args = parser.parse_args()
-
+def rip_audio_cd(device: str, output: str = "/output-cd") -> int:
+    """Core CD rip logic. Returns whipper exit code."""
     os.environ["HOME"] = "/config"
 
     print("Querying disc info...")
-    info = _query_disc_info(args.device)
+    info = _query_disc_info(device)
 
     disc_total = info.get("disc_total", 1)
     title = info.get("title", "")
@@ -139,10 +135,10 @@ def main() -> None:
         "whipper",
         "cd",
         "-d",
-        args.device,
+        device,
         "rip",
         "-O",
-        args.output,
+        output,
         "--track-template",
         track_tpl,
         "--disc-template",
@@ -153,7 +149,7 @@ def main() -> None:
 
     # Post-rip: flatten multi-disc directories
     if disc_total > 1:
-        _flatten_multi_disc_dirs(Path(args.output))
+        _flatten_multi_disc_dirs(Path(output))
 
     # Notification
     if rc == 0 and title:
@@ -172,6 +168,16 @@ def main() -> None:
     elif rc != 0:
         notify("CD rip failed", f"{artist or 'Unknown'} - {title or 'Unknown'} (exit {rc})", error=True)
 
+    return rc
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="CD ripper — whipper with multi-disc detection")
+    parser.add_argument("-d", "--device", default="/dev/sr1", help="CD drive device")
+    parser.add_argument("-o", "--output", default="/output-cd", help="Output directory")
+    args = parser.parse_args()
+
+    rc = rip_audio_cd(args.device, args.output)
     raise SystemExit(rc)
 
 

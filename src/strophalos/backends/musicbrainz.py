@@ -10,13 +10,20 @@ from strophalos.core.http import get_json
 MB_USER_AGENT = "strophalos/1.0"
 
 
-def _mb_server() -> str:
-    return os.environ.get("MB_SERVER", "mb-web:5000")
+def _mb_base() -> str:
+    """MusicBrainz API base URL. Set MB_SERVER to override (e.g. 'mb.example.com')."""
+    server = os.environ.get("MB_SERVER", "")
+    if not server:
+        return "https://musicbrainz.org"
+    # If it already has a scheme, use as-is
+    if server.startswith("http://") or server.startswith("https://"):
+        return server.rstrip("/")
+    return f"https://{server}"
 
 
 def _mb_get(path: str) -> dict[str, Any] | None:
     """GET a MusicBrainz API endpoint."""
-    url = f"http://{_mb_server()}/ws/2{path}"
+    url = f"{_mb_base()}/ws/2{path}"
     return get_json(url, headers={"User-Agent": MB_USER_AGENT}, timeout=5)
 
 
@@ -36,7 +43,7 @@ def search_release(label: str, durations: list[float]) -> dict[str, Any] | None:
     if not query:
         return None
 
-    url = f"http://{_mb_server()}/ws/2/release/?query=release:{urllib.parse.quote(query)}&fmt=json&limit=10"
+    url = f"{_mb_base()}/ws/2/release/?query=release:{urllib.parse.quote(query)}&fmt=json&limit=10"
     data = get_json(url, headers={"User-Agent": MB_USER_AGENT}, timeout=5)
     if not data:
         return None
@@ -57,7 +64,7 @@ def search_release(label: str, durations: list[float]) -> dict[str, Any] | None:
             artist = rel["artist-credit"][0].get("name", "")
 
         # Fetch full release with recordings
-        detail_url = f"http://{_mb_server()}/ws/2/release/{rel_id}?inc=recordings+media+artist-credits&fmt=json"
+        detail_url = f"{_mb_base()}/ws/2/release/{rel_id}?inc=recordings+media+artist-credits&fmt=json"
         detail = get_json(detail_url, headers={"User-Agent": MB_USER_AGENT}, timeout=5)
         if not detail:
             continue
@@ -122,7 +129,7 @@ def score_musicbrainz(disc_label: str | None, durations: dict[int, int]) -> tupl
     if not query:
         return 0.0, None
 
-    url = f"http://{_mb_server()}/ws/2/release/?query=release:{urllib.parse.quote(query)}&fmt=json&limit=5"
+    url = f"{_mb_base()}/ws/2/release/?query=release:{urllib.parse.quote(query)}&fmt=json&limit=5"
     data = get_json(url, headers={"User-Agent": MB_USER_AGENT}, timeout=5)
     if not data:
         return 0.0, None
@@ -154,7 +161,7 @@ def score_musicbrainz(disc_label: str | None, durations: dict[int, int]) -> tupl
 
         if not track_durs:
             # Need to fetch full release for track info
-            detail_url = f"http://{_mb_server()}/ws/2/release/{rel_id}?inc=recordings+media&fmt=json"
+            detail_url = f"{_mb_base()}/ws/2/release/{rel_id}?inc=recordings+media&fmt=json"
             detail = get_json(detail_url, headers={"User-Agent": MB_USER_AGENT}, timeout=5)
             if not detail:
                 continue

@@ -1,2 +1,5 @@
 data/
 99-strophalos.rules
+compose.yml
+.env
+__pycache__/

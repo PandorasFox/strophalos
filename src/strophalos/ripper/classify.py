@@ -164,8 +164,8 @@ def classify_disc(
     m_score, m_titles, m_reason = _score_movie(sorted_titles, longest_tid, longest_dur, rest, meaningful)
     t_score, t_titles, t_reason = _score_tv(sorted_titles, longest_tid, longest_dur, rest, meaningful)
 
-    # Optional title search boost
-    m_boost, t_boost = score_title_search(disc_label)
+    # Optional title search boost (with runtime matching)
+    m_boost, t_boost = score_title_search(disc_label, durations)
     m_score += m_boost
     t_score += t_boost
 

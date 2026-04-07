@@ -109,7 +109,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get autoremove --purge -y \
     && rm -rf /var/lib/apt/lists/*
 
-# Shell orchestrator, config, and default hooks
+# Config, default hooks, and legacy shell orchestrator (manual fallback)
 COPY config/whipper.conf /defaults/whipper.conf
 COPY hooks/ /defaults/hooks/
 COPY scripts/auto-rip.sh /usr/local/bin/auto-rip.sh
@@ -120,4 +120,4 @@ ENV HOME=/config
 VOLUME ["/config", "/media", "/output-cd"]
 # /media is the library root: archive/tv/rips, archive/movies/rips, library/tv, library/movies
 
-CMD ["/usr/local/bin/auto-rip.sh"]
+CMD ["strophalos-daemon"]
