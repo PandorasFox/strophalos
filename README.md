@@ -4,9 +4,31 @@ Zero-touch disc-to-library pipeline. Insert a disc, walk away — ripped files a
 
 Raw rips are preserved in an immutable archive (`archive/{tv,movies}/rips/{medium}/{label}/disc{N}/`). The library (`tv/`, `movies/`) is derived via hard links — same bytes, no extra space, can be blown away and regenerated from archive at any time.
 
-**Constraint**: discs must be ripped in sequential order (disc 1 first, then disc 2, etc.) so that episodes can be packed against TMDb DVD/Blu-ray release orderings. If TMDb doesn't have an entry for your disc, you'll get a notification to go add it — the archive is safe and re-identification can be run at any time.
+Uses [makemkv](https://www.makemkv.com/) (product key req. for >30d) for video discs and [whipper](https://github.com/whipper-team/whipper) for audio CDs. also uses uhhh TODO for the DVDs. 
 
-Uses [makemkv](https://www.makemkv.com/) (product key req. for >30d) for video discs and [whipper](https://github.com/whipper-team/whipper) for audio CDs. UHD Blu-ray ripping requires a LibreDrive compatible drive — check the [makemkv forums](https://forum.makemkv.com/).
+UHD Blu-ray ripping requires a LibreDrive compatible drive — check the [makemkv forums](https://forum.makemkv.com/).
+
+## overview & background
+
+my blu-ray reader (ASUS BW-16D1HT) has some Quirks that made writing a proper pipeline challenging. I succeeded anyways. The gist:
+
+* always says a disc is inserted, even when one isn't
+  * proper check is to check `sgX` for the size it reports, and only interact with `srX` if sgX says the size != 0
+  * otherwise, the drive firmware can get janky/wedged
+
+the goal is to put in a disc (audio CD, dvd, blu-ray, uhd blu-ray, data dvd (old game installers), audio+data (cooler old game installers) and have it rip and tag automatically.
+
+this is accomplished by:
+- discID -> musicbrainz lookup for audio CDs
+- TMDb lookups for dvds, blu-rays
+  - TV show episodes usually rip with no metadata besides duration and subtitles
+    - opensubtitles -> hungarian assignment via subtitle fuzzy matching (and elimination-packing remainders against TMDb physical release listings) has had 100% success in my testing so far :)
+  - Movies tend to tag just fine
+- blu-rays that don't Seem To Be Movies also get checked against Musicbrainz to see if they're an audio CD (e.g. FFXIV blu-ray soundtracks)
+
+which stages run is configurable. this is because i rip at my desktop, output over 2.5Gb NFS to my NAS, and have my NAS do the ID'ing and hard-link deploying into my jellyfin/navidrome libraries.
+
+the rest of this readme/docs are mostly claude-written and are reasonably accurate
 
 ## Features
 
