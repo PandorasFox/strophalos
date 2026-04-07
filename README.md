@@ -16,6 +16,23 @@ my blu-ray reader (ASUS BW-16D1HT) has some Quirks that made writing a proper pi
   * proper check is to check `sgX` for the size it reports, and only interact with `srX` if sgX says the size != 0
   * otherwise, the drive firmware can get janky/wedged
 
+for reference:
+
+    ➜ sg_readcap /dev/sg0
+        Read Capacity results:
+        Last LBA=22051615 (0x1507b1f), Number of logical blocks=22051616
+        Logical block length=2048 bytes
+    Hence:
+        Device size: 45161709568 bytes, 43069.6 MiB, 45.16 GB
+    ➜ sg_readcap /dev/sg0
+        Read Capacity results:
+        Last LBA=0 (0x0), Number of logical blocks=1
+        Logical block length=0 bytes
+    Hence:
+        Device size: 0 bytes, 0.0 MiB, 0.00 GB
+
+is the gist of the heuristic here for gating operations.
+
 the goal is to put in a disc (audio CD, dvd, blu-ray, uhd blu-ray, data dvd (old game installers), audio+data (cooler old game installers) and have it rip and tag automatically.
 
 this is accomplished by:

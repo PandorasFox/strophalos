@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 import threading
 import time
 from datetime import datetime
@@ -16,8 +15,6 @@ from strophalos.daemon.drive import check_disc_present, check_media_changed, eje
 from strophalos.daemon.manifest import (
     RipManifest,
     find_pending_rips,
-    update_manifest_done,
-    update_manifest_failed,
     write_manifest,
 )
 from strophalos.ripper.probe import ProbeResult, probe_disc
@@ -196,8 +193,7 @@ class Orchestrator:
 
         notify(
             "Disc ripped",
-            f"{probe.label} — {result.title_count} title(s), "
-            f"{result.disc_type} ({result.media_type})",
+            f"{probe.label} — {result.title_count} title(s), {result.disc_type} ({result.media_type})",
         )
         return result
 
@@ -247,7 +243,7 @@ class Orchestrator:
     def _chown_output(self, path: Path) -> None:
         """Recursively chown output directory to PUID:PGID."""
         try:
-            for root, dirs, files in os.walk(path):
+            for root, _dirs, files in os.walk(path):
                 os.chown(root, self.puid, self.pgid)
                 for f in files:
                     os.chown(os.path.join(root, f), self.puid, self.pgid)

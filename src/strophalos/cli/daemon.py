@@ -7,7 +7,7 @@ import os
 import signal
 import sys
 
-from strophalos.daemon.init import drop_privileges, initialize
+from strophalos.daemon.init import initialize
 from strophalos.daemon.orchestrator import Orchestrator, PipelineMode
 
 

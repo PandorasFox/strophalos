@@ -7,7 +7,7 @@ import os
 import struct
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -252,7 +252,7 @@ def _is_negative_expired(entry: dict[str, Any]) -> bool:
         return True
     try:
         fetched_dt = datetime.fromisoformat(fetched)
-        age = datetime.now(timezone.utc) - fetched_dt
+        age = datetime.now(UTC) - fetched_dt
         return age.days > NEGATIVE_CACHE_TTL_DAYS
     except Exception:
         return True
@@ -289,7 +289,6 @@ def _search_episode_subs(
         attrs = entry.get("attributes", {})
         for f in attrs.get("files", []):
             file_id = f.get("file_id")
-            downloads = f.get("cd_number", 0)  # fallback
             # Use the entry-level download_count as proxy
             dl_count = attrs.get("download_count", 0)
             if file_id and dl_count > best_downloads:
@@ -374,7 +373,7 @@ def fetch_reference_subs(
         if file_id is None:
             cache_index[key] = {
                 "not_found": True,
-                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "fetched_at": datetime.now(UTC).isoformat(),
             }
             print(f"    {ep.code}: no subs available")
             continue
@@ -393,7 +392,7 @@ def fetch_reference_subs(
         cache_index[key] = {
             "file_id": file_id,
             "language": "en",
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "fetched_at": datetime.now(UTC).isoformat(),
             "not_found": False,
         }
 
