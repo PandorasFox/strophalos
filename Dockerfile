@@ -117,7 +117,9 @@ RUN chmod +x /usr/local/bin/auto-rip.sh
 
 ENV HOME=/config
 
-VOLUME ["/config", "/media", "/output-cd"]
+VOLUME ["/config", "/media", "/output-cd", "/output-bd"]
 # /media is the library root: archive/tv/rips, archive/movies/rips, library/tv, library/movies
+# /output-cd is for audio CD rips (FLAC via whipper)
+# /output-bd is for audio Blu-ray rips (MKV chapter splits)
 
 CMD ["strophalos-daemon"]

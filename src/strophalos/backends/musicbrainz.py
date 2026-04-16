@@ -164,22 +164,37 @@ def search_release(label: str, durations: list[float], prefer_bluray: bool = Fal
             if detail:
                 artist = _get_artist(detail)
 
-        if len(tracks) != n_tracks:
+        if not tracks:
             continue
 
-        # Check duration alignment
-        track_durs = sorted(t["duration"] for t in tracks)
-        total_diff = sum(abs(a - b) for a, b in zip(sorted_durs, track_durs, strict=True))
-        avg_diff = total_diff / n_tracks
+        # For exact count match, compare per-track durations
+        if len(tracks) == n_tracks:
+            track_durs = sorted(t["duration"] for t in tracks)
+            total_diff = sum(abs(a - b) for a, b in zip(sorted_durs, track_durs))
+            avg_diff = total_diff / n_tracks
+            if avg_diff < 5.0:
+                print(f"  MusicBrainz: {artist} - {rel_title} ({len(tracks)} tracks, avg diff {avg_diff:.1f}s)")
+                return {
+                    "id": rel_id,
+                    "title": rel_title,
+                    "artist": artist,
+                    "tracks": tracks,
+                }
 
-        if avg_diff < 5.0:
-            print(f"  MusicBrainz: {artist} - {rel_title} ({len(tracks)} tracks, avg diff {avg_diff:.1f}s)")
-            return {
-                "id": rel_id,
-                "title": rel_title,
-                "artist": artist,
-                "tracks": tracks,
-            }
+        # For count mismatch (e.g. BD chapter splits), match by total duration
+        mb_total = sum(t["duration"] for t in tracks)
+        file_total = sum(sorted_durs)
+        if mb_total > 0 and file_total > 0:
+            diff_pct = abs(mb_total - file_total) / mb_total
+            if diff_pct < 0.02:
+                print(f"  MusicBrainz: {artist} - {rel_title} "
+                      f"({len(tracks)} tracks, total duration match {diff_pct:.1%} off)")
+                return {
+                    "id": rel_id,
+                    "title": rel_title,
+                    "artist": artist,
+                    "tracks": tracks,
+                }
 
     print("  MusicBrainz: no duration match found")
     return None

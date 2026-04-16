@@ -223,6 +223,7 @@ def rip_video_disc(
     drive: int,
     label: str | None = None,
     output: str = "/media/archive",
+    output_bd_audio: str = "/output-bd",
     dry_run: bool = False,
 ) -> RipResult | None:
     """Core rip-video logic. Returns structured result or None on failure."""
@@ -269,9 +270,14 @@ def rip_video_disc(
             label=label or disc_label or "unknown_disc",
         )
 
-    content_type = {"tv": "tv", "music": "music"}.get(disc_type, "movies")
     dir_label = label or disc_label or "unknown_disc"
-    label_dir = os.path.join(output, content_type, "rips", media_type, dir_label)
+
+    # Music BDs go to a separate output path (like audio CDs go to /output-cd)
+    if disc_type == "music":
+        label_dir = os.path.join(output_bd_audio, dir_label)
+    else:
+        content_type = {"tv": "tv"}.get(disc_type, "movies")
+        label_dir = os.path.join(output, content_type, "rips", media_type, dir_label)
 
     # Auto-increment disc number
     disc_num = 1
