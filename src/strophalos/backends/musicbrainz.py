@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import urllib.parse
 from typing import Any
 
 from strophalos.core.http import get_json
@@ -15,7 +16,6 @@ def _mb_base() -> str:
     server = os.environ.get("MB_SERVER", "")
     if not server:
         return "https://musicbrainz.org"
-    # If it already has a scheme, use as-is
     if server.startswith("http://") or server.startswith("https://"):
         return server.rstrip("/")
     return f"https://{server}"
@@ -24,7 +24,98 @@ def _mb_base() -> str:
 def _mb_get(path: str) -> dict[str, Any] | None:
     """GET a MusicBrainz API endpoint."""
     url = f"{_mb_base()}/ws/2{path}"
-    return get_json(url, headers={"User-Agent": MB_USER_AGENT}, timeout=5)
+    return get_json(url, headers={"User-Agent": MB_USER_AGENT}, timeout=10)
+
+
+def _search_releases(query: str, limit: int = 10) -> list[dict[str, Any]]:
+    """Search MB for releases by query string. Returns raw release list."""
+    url = f"{_mb_base()}/ws/2/release/?query={urllib.parse.quote(query)}&fmt=json&limit={limit}"
+    data = get_json(url, headers={"User-Agent": MB_USER_AGENT}, timeout=10)
+    if not data:
+        return []
+    return data.get("releases", [])
+
+
+def _fetch_release_detail(release_id: str) -> dict[str, Any] | None:
+    """Fetch full release detail with recordings, media, and artist credits."""
+    url = f"{_mb_base()}/ws/2/release/{release_id}?inc=recordings+media+artist-credits&fmt=json"
+    return get_json(url, headers={"User-Agent": MB_USER_AGENT}, timeout=10)
+
+
+def _get_artist(rel: dict[str, Any]) -> str:
+    """Extract artist name from a release dict."""
+    credits = rel.get("artist-credit", [])
+    if credits:
+        # Could be nested under "artist" key or directly on the credit
+        credit = credits[0]
+        return credit.get("name", "") or credit.get("artist", {}).get("name", "")
+    return ""
+
+
+def _filter_bluray_releases(releases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Filter releases to only those with Blu-ray media."""
+    bd_releases = []
+    for rel in releases:
+        for medium in rel.get("media", []):
+            fmt = (medium.get("format") or "").lower()
+            if "blu-ray" in fmt:
+                bd_releases.append(rel)
+                break
+    return bd_releases
+
+
+def _pick_best_release(releases: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """From a list of releases, prefer eng language, then first result."""
+    if not releases:
+        return None
+    # Prefer English pseudo-release
+    for rel in releases:
+        lang = rel.get("text-representation", {}).get("language", "")
+        if lang == "eng":
+            return rel
+    return releases[0]
+
+
+def _get_release_tracks(rel: dict[str, Any], release_id: str) -> list[dict[str, Any]]:
+    """Get track list with durations, fetching detail if needed."""
+    tracks: list[dict[str, Any]] = []
+
+    # Try from search result media first
+    has_lengths = False
+    for medium in rel.get("media", []):
+        for track in medium.get("tracks", []):
+            length_ms = track.get("length")
+            if length_ms:
+                has_lengths = True
+            rec = track.get("recording", {})
+            tracks.append({
+                "position": track.get("position", track.get("number", "?")),
+                "title": rec.get("title", track.get("title", "?")),
+                "recording_id": rec.get("id", ""),
+                "duration": int(length_ms) / 1000.0 if length_ms else 0.0,
+            })
+
+    if tracks and has_lengths:
+        return tracks
+
+    # Fetch full detail for recording lengths
+    detail = _fetch_release_detail(release_id)
+    if not detail:
+        return tracks
+
+    tracks = []
+    for medium in detail.get("media", []):
+        for track in medium.get("tracks", []):
+            rec = track.get("recording", {})
+            length_ms = rec.get("length") or track.get("length")
+            tracks.append({
+                "position": track.get("position", track.get("number", "?")),
+                "title": rec.get("title", track.get("title", "?")),
+                "recording_id": rec.get("id", ""),
+                "duration": int(length_ms) / 1000.0 if length_ms else 0.0,
+            })
+
+    return tracks
 
 
 # ---------------------------------------------------------------------------
@@ -32,61 +123,46 @@ def _mb_get(path: str) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
-def search_release(label: str, durations: list[float]) -> dict[str, Any] | None:
+def search_release(label: str, durations: list[float], prefer_bluray: bool = False) -> dict[str, Any] | None:
     """Search MusicBrainz for a release matching the disc label + track durations.
+
+    If prefer_bluray is True, filters results to Blu-ray releases and prefers
+    eng language. Falls back to all releases if no Blu-ray results found.
 
     Returns {id, title, artist, tracks: [{position, title, recording_id, duration}]} or None.
     """
-    import urllib.parse
-
     query = label.replace("_", " ").strip()
     if not query:
         return None
 
-    url = f"{_mb_base()}/ws/2/release/?query=release:{urllib.parse.quote(query)}&fmt=json&limit=10"
-    data = get_json(url, headers={"User-Agent": MB_USER_AGENT}, timeout=5)
-    if not data:
-        return None
-
-    releases = data.get("releases", [])
+    releases = _search_releases(f"release:{query}")
     if not releases:
         print(f"  MusicBrainz: no results for '{query}'")
         return None
 
+    # Filter to Blu-ray if requested
+    candidates = releases
+    if prefer_bluray:
+        bd_releases = _filter_bluray_releases(releases)
+        if bd_releases:
+            candidates = [_pick_best_release(bd_releases)]  # type: ignore[list-item]
+            print(f"  MusicBrainz: filtered to {len(bd_releases)} Blu-ray release(s), using {candidates[0]['title']}")
+
     n_tracks = len(durations)
     sorted_durs = sorted(durations)
 
-    for rel in releases:
+    for rel in candidates:
+        if rel is None:
+            continue
         rel_id = rel.get("id", "")
         rel_title = rel.get("title", "")
-        artist = ""
-        if rel.get("artist-credit"):
-            artist = rel["artist-credit"][0].get("name", "")
+        artist = _get_artist(rel)
 
-        # Fetch full release with recordings
-        detail_url = f"{_mb_base()}/ws/2/release/{rel_id}?inc=recordings+media+artist-credits&fmt=json"
-        detail = get_json(detail_url, headers={"User-Agent": MB_USER_AGENT}, timeout=5)
-        if not detail:
-            continue
-
-        # Extract artist from detail if not in search result
-        if not artist and detail.get("artist-credit"):
-            artist = detail["artist-credit"][0].get("artist", {}).get("name", "")
-
-        # Build track list with durations
-        tracks: list[dict[str, Any]] = []
-        for medium in detail.get("media", []):
-            for track in medium.get("tracks", []):
-                rec = track.get("recording", {})
-                length_ms = rec.get("length") or track.get("length")
-                tracks.append(
-                    {
-                        "position": track.get("position", track.get("number", "?")),
-                        "title": rec.get("title", track.get("title", "?")),
-                        "recording_id": rec.get("id", ""),
-                        "duration": int(length_ms) / 1000.0 if length_ms else 0.0,
-                    }
-                )
+        tracks = _get_release_tracks(rel, rel_id)
+        if not artist:
+            detail = _fetch_release_detail(rel_id)
+            if detail:
+                artist = _get_artist(detail)
 
         if len(tracks) != n_tracks:
             continue
@@ -115,13 +191,12 @@ def search_release(label: str, durations: list[float]) -> dict[str, Any] | None:
 
 
 def score_musicbrainz(disc_label: str | None, durations: dict[int, int]) -> tuple[float, dict[str, Any] | None]:
-    """Check MusicBrainz for a matching release. Returns (score, release_info).
+    """Check MusicBrainz for a matching audio BD release. Returns (score, release_info).
 
-    Searches by disc label against the MusicBrainz replica. If a release matches
-    and track durations align with title durations, returns a high score.
+    Searches by disc label, filters to Blu-ray releases, prefers English.
+    Matches by total duration (since makemkv groups BD tracks into titles by
+    playlist structure, so track counts won't match).
     """
-    import urllib.parse
-
     if not disc_label:
         return 0.0, None
 
@@ -129,72 +204,73 @@ def score_musicbrainz(disc_label: str | None, durations: dict[int, int]) -> tupl
     if not query:
         return 0.0, None
 
-    url = f"{_mb_base()}/ws/2/release/?query=release:{urllib.parse.quote(query)}&fmt=json&limit=5"
-    data = get_json(url, headers={"User-Agent": MB_USER_AGENT}, timeout=5)
-    if not data:
-        return 0.0, None
-
-    releases = data.get("releases", [])
+    releases = _search_releases(f'release:"{query}"')
     if not releases:
         return 0.0, None
 
-    title_durs = sorted(durations.values())
-    n_titles = len(title_durs)
+    # Filter to Blu-ray releases only
+    bd_releases = _filter_bluray_releases(releases)
+    if not bd_releases:
+        # Fall back to unfiltered if no Blu-ray results
+        bd_releases = releases
 
-    best_score = 0.0
-    best_release: dict[str, Any] | None = None
+    best = _pick_best_release(bd_releases)
+    if best is None:
+        return 0.0, None
 
-    for rel in releases:
-        rel_id = rel.get("id", "")
-        rel_title = rel.get("title", "")
-        artist = ""
-        if rel.get("artist-credit"):
-            artist = rel["artist-credit"][0].get("name", "")
+    rel_id = best.get("id", "")
+    rel_title = best.get("title", "")
+    artist = _get_artist(best)
 
-        # Get track durations from the release's media
-        track_durs: list[float] = []
-        for medium in rel.get("media", []):
-            for track in medium.get("tracks", []):
-                length_ms = track.get("length")
-                if length_ms:
-                    track_durs.append(length_ms / 1000.0)
+    tracks = _get_release_tracks(best, rel_id)
+    if not artist:
+        detail = _fetch_release_detail(rel_id)
+        if detail:
+            artist = _get_artist(detail)
 
-        if not track_durs:
-            # Need to fetch full release for track info
-            detail_url = f"{_mb_base()}/ws/2/release/{rel_id}?inc=recordings+media&fmt=json"
-            detail = get_json(detail_url, headers={"User-Agent": MB_USER_AGENT}, timeout=5)
-            if not detail:
-                continue
-            for medium in detail.get("media", []):
-                for track in medium.get("tracks", []):
-                    rec = track.get("recording", {})
-                    length_ms = rec.get("length") or track.get("length")
-                    if length_ms:
-                        track_durs.append(int(length_ms) / 1000.0)
+    if not tracks:
+        return 0.0, None
 
-        if not track_durs or len(track_durs) != n_titles:
-            continue
+    # Total duration of all MB tracks
+    mb_total = sum(t["duration"] for t in tracks)
+    if mb_total == 0:
+        return 0.0, None
 
-        sorted_tracks = sorted(track_durs)
-        total_diff = sum(abs(td - rd) for td, rd in zip(title_durs, sorted_tracks, strict=True))
-        avg_diff = total_diff / n_titles
+    # For audio BDs, makemkv groups tracks into titles. The longest title
+    # is usually the play-all (all tracks concatenated). Compare that against
+    # the MB total, OR compare the sum of all titles (minus play-all duplicates).
+    title_durs = sorted(durations.values(), reverse=True)
 
-        if avg_diff < 5.0:
-            score = max(0, 1.0 - avg_diff / 5.0)
-            if score > best_score:
-                best_score = score
-                best_release = {
-                    "artist": artist,
-                    "title": rel_title,
-                    "id": rel_id,
-                    "track_count": len(track_durs),
-                    "avg_diff": avg_diff,
-                }
+    # Strategy 1: longest title (play-all) vs MB total
+    play_all_dur = title_durs[0]
+    play_all_diff = abs(play_all_dur - mb_total) / mb_total if mb_total > 0 else 1.0
 
-    if best_release:
+    # Strategy 2: sum of non-play-all titles vs MB total
+    # (if play-all exists, the other titles are sections that should sum to ~play-all)
+    non_play_all = title_durs[1:] if len(title_durs) > 1 else title_durs
+    sections_total = sum(non_play_all)
+    sections_diff = abs(sections_total - mb_total) / mb_total if mb_total > 0 else 1.0
+
+    best_diff = min(play_all_diff, sections_diff)
+    method = "play-all" if play_all_diff <= sections_diff else "sections"
+
+    if best_diff < 0.02:  # within 2%
+        score = max(0.0, 1.0 - best_diff * 50)  # 0% diff = 1.0, 2% diff = 0.0
+        release_info = {
+            "artist": artist,
+            "title": rel_title,
+            "id": rel_id,
+            "track_count": len(tracks),
+            "match_method": method,
+            "duration_diff_pct": f"{best_diff:.1%}",
+        }
         print(
-            f"  MusicBrainz: matched '{query}' → {best_release['artist']} - {best_release['title']}"
-            f" ({best_release['track_count']} tracks, avg diff {best_release['avg_diff']:.1f}s)"
+            f"  MusicBrainz: matched '{query}' → {artist} - {rel_title}"
+            f" ({len(tracks)} tracks, {method} match, {best_diff:.1%} off)"
         )
+        return score, release_info
 
-    return best_score, best_release
+    if best_diff < 0.05:
+        print(f"  MusicBrainz: weak match for '{query}' — {artist} - {rel_title} ({best_diff:.1%} off via {method})")
+
+    return 0.0, None

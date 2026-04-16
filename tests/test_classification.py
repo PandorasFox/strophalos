@@ -136,7 +136,7 @@ class TestClassifyDisc:
     @patch("strophalos.ripper.classify.score_musicbrainz", return_value=(0.0, None))
     @patch("strophalos.ripper.classify.score_title_search", return_value=(0.0, 0.0))
     def test_empty_disc(self, mock_tmdb, mock_mb):
-        disc_type, titles, reason = classify_disc({}, {})
+        disc_type, titles, reason, _meta = classify_disc({}, {})
         assert disc_type == "unknown"
         assert titles == []
 
@@ -144,7 +144,7 @@ class TestClassifyDisc:
     @patch("strophalos.ripper.classify.score_title_search", return_value=(0.0, 0.0))
     def test_single_long_title_is_movie(self, mock_tmdb, mock_mb):
         durations = {0: 7200}
-        disc_type, titles, reason = classify_disc(durations, {})
+        disc_type, titles, reason, _meta = classify_disc(durations, {})
         assert disc_type == "movie"
         assert titles == [0]
 
@@ -153,7 +153,7 @@ class TestClassifyDisc:
     def test_movie_disc_pattern(self, mock_tmdb, mock_mb):
         """Feature + short extras → movie."""
         durations = {0: 7200, 1: 300, 2: 180, 3: 120}
-        disc_type, titles, reason = classify_disc(durations, {})
+        disc_type, titles, reason, _meta = classify_disc(durations, {})
         assert disc_type == "movie"
         assert 0 in titles
 
@@ -165,7 +165,7 @@ class TestClassifyDisc:
         play_all = ep_dur * 6
         durations = {0: play_all}
         durations.update({i + 1: ep_dur for i in range(6)})
-        disc_type, titles, reason = classify_disc(durations, {})
+        disc_type, titles, reason, _meta = classify_disc(durations, {})
         assert disc_type == "tv"
         # Should rip episodes, not play-all
         assert 0 not in titles
@@ -173,12 +173,17 @@ class TestClassifyDisc:
     @patch("strophalos.ripper.classify.score_musicbrainz")
     @patch("strophalos.ripper.classify.score_title_search", return_value=(0.0, 0.0))
     def test_strong_musicbrainz_match_is_music(self, mock_tmdb, mock_mb):
-        """Strong MusicBrainz match → music."""
+        """Strong MusicBrainz match → music, returns play-all title."""
         mock_mb.return_value = (0.9, {"artist": "Test", "title": "Album", "track_count": 12})
         durations = {i: 240 for i in range(12)}
-        disc_type, titles, reason = classify_disc(durations, {}, "TEST_ALBUM")
+        chapters = {i: 1 for i in range(12)}
+        # Title 12 is the play-all with 12 chapters
+        durations[12] = 240 * 12
+        chapters[12] = 12
+        disc_type, titles, reason, meta = classify_disc(durations, chapters, "TEST_ALBUM")
         assert disc_type == "music"
-        assert len(titles) == 12
+        assert titles == [12]  # play-all title selected
+        assert meta is not None
 
     @patch("strophalos.ripper.classify.score_musicbrainz", return_value=(0.0, None))
     @patch("strophalos.ripper.classify.score_title_search", return_value=(0.0, 0.3))
@@ -186,5 +191,5 @@ class TestClassifyDisc:
         """TMDb TV boost should tip a borderline disc toward TV."""
         # Borderline case: 4 episodes of 2500s + a 5000s title
         durations = {0: 5000, 1: 2500, 2: 2500, 3: 2500, 4: 2500}
-        disc_type, titles, reason = classify_disc(durations, {}, "SOME_SHOW")
+        disc_type, titles, reason, _meta = classify_disc(durations, {}, "SOME_SHOW")
         assert disc_type == "tv"

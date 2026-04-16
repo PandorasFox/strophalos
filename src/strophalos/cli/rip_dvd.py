@@ -44,7 +44,7 @@ def rip_dvd_disc(
         hours, mins = divmod(mins, 60)
         print(f"  Title {tid:2d}: {hours}:{mins:02d}:{secs:02d}  ({ch} chapters)")
 
-    disc_type, to_rip, reason = classify_disc(durations, chapters, dir_label)
+    disc_type, to_rip, reason, _metadata = classify_disc(durations, chapters, dir_label)
     print(f"\nClassification: {disc_type}")
     print(f"Reason: {reason}")
     print(f"Titles to rip: {to_rip}")

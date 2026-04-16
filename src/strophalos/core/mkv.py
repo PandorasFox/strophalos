@@ -50,6 +50,25 @@ def get_mkv_duration(mkv_path: Path) -> float:
     return 0.0
 
 
+def split_by_chapters(mkv_path: Path, output_dir: Path, prefix: str = "ch") -> list[Path]:
+    """Split an MKV by chapter boundaries into individual files.
+
+    Uses mkvmerge --split chapters:all. Returns sorted list of output file paths.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pattern = str(output_dir / f"{prefix}-%03d.mkv")
+    result = subprocess.run(
+        ["mkvmerge", "-o", pattern, "--split", "chapters:all", str(mkv_path)],
+        capture_output=True,
+        text=True,
+        timeout=3600,
+    )
+    if result.returncode > 1:  # mkvmerge: 0=ok, 1=warnings, 2=error
+        print(f"  mkvmerge split failed (rc={result.returncode}): {result.stderr.strip()}")
+        return []
+    return sorted(output_dir.glob(f"{prefix}-*.mkv"))
+
+
 def list_subtitle_tracks(mkv_path: Path) -> list[SubtitleTrack]:
     """List subtitle tracks in an MKV file."""
     try:

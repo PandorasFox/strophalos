@@ -130,13 +130,14 @@ def classify_disc(
     durations: dict[int, int],
     chapters: dict[int, int],
     disc_label: str | None = None,
-) -> tuple[str, list[int], str]:
+) -> tuple[str, list[int], str, dict | None]:
     """Classify disc as 'tv', 'movie', 'music', or 'unknown' and return titles to rip.
 
-    Returns (disc_type, titles_to_rip, reason).
+    Returns (disc_type, titles_to_rip, reason, metadata).
+    metadata is non-None for music discs (contains MB release info).
     """
     if not durations:
-        return "unknown", [], "no titles found"
+        return "unknown", [], "no titles found", None
 
     sorted_titles = sorted(durations.items(), key=lambda x: x[1], reverse=True)
     longest_tid, longest_dur = sorted_titles[0]
@@ -147,18 +148,33 @@ def classify_disc(
     # Check MusicBrainz first — audio BDs have many short tracks
     mb_score, mb_release = score_musicbrainz(disc_label, durations)
     if mb_score > 0.7:
+        # Identify the play-all title: longest title with chapter count
+        # closest to MB track count
+        play_all_tid = longest_tid
+        if mb_release and "track_count" in mb_release:
+            mb_track_count = mb_release["track_count"]
+            best_diff = abs(chapters.get(longest_tid, 0) - mb_track_count)
+            for tid, dur in sorted_titles:
+                ch = chapters.get(tid, 0)
+                diff = abs(ch - mb_track_count)
+                if diff < best_diff:
+                    best_diff = diff
+                    play_all_tid = tid
+
         return (
             "music",
-            list(durations.keys()),
+            [play_all_tid],
             f"musicbrainz match: {mb_release['artist']} - {mb_release['title']} "
-            f"(score={mb_score:.2f}, {mb_release['track_count']} tracks)",
+            f"(score={mb_score:.2f}, {mb_release['track_count']} tracks, "
+            f"play-all=title {play_all_tid})",
+            mb_release,
         )
 
     if len(meaningful) == 0:
-        return "unknown", [t[0] for t in sorted_titles], "no meaningful titles"
+        return "unknown", [t[0] for t in sorted_titles], "no meaningful titles", None
 
     if len(meaningful) == 1:
-        return "movie", [meaningful[0][0]], "single main title"
+        return "movie", [meaningful[0][0]], "single main title", None
 
     # Score both patterns
     m_score, m_titles, m_reason = _score_movie(sorted_titles, longest_tid, longest_dur, rest, meaningful)
@@ -181,12 +197,13 @@ def classify_disc(
     print(f"          tv={t_score:.2f} [{t_reason}]")
 
     if t_score > m_score:
-        return "tv", t_titles, f"tv={t_score:.2f} > movie={m_score:.2f}{search_note}"
+        return "tv", t_titles, f"tv={t_score:.2f} > movie={m_score:.2f}{search_note}", None
     elif m_score > t_score:
-        return "movie", m_titles, f"movie={m_score:.2f} > tv={t_score:.2f}{search_note}"
+        return "movie", m_titles, f"movie={m_score:.2f} > tv={t_score:.2f}{search_note}", None
     else:
         return (
             "unknown",
             [tid for tid, _ in meaningful],
             f"tied {m_score:.2f}{search_note}, ripping all {len(meaningful)}",
+            None,
         )
