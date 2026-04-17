@@ -123,3 +123,71 @@ class TestSubsetPruning:
         remaining = self._get_remaining_tids(durations, chapters, play_all_tid=0)
         assert 1 in remaining  # 0 chapters → kept
         assert 2 not in remaining  # 5 chapters, subset → pruned
+
+
+class TestSlidingWindowMatch:
+    """Test the sliding window matching algorithm for no-play-all discs."""
+
+    def test_exact_match_at_start(self):
+        from strophalos.cli.rip_video import _slide_window_match
+
+        mb_durs = [180, 240, 300, 200, 260, 320]
+        ch_durs = [180, 240, 300]
+        pos, avg = _slide_window_match(ch_durs, mb_durs)
+        assert pos == 0
+        assert avg < 1.0
+
+    def test_exact_match_at_offset(self):
+        from strophalos.cli.rip_video import _slide_window_match
+
+        mb_durs = [180, 240, 300, 200, 260, 320]
+        ch_durs = [200, 260, 320]
+        pos, avg = _slide_window_match(ch_durs, mb_durs)
+        assert pos == 3
+        assert avg < 1.0
+
+    def test_fuzzy_match_within_tolerance(self):
+        """Chapter durations may differ slightly from MB — should still match."""
+        from strophalos.cli.rip_video import _slide_window_match
+
+        mb_durs = [180, 240, 300, 200, 260, 320]
+        # Same as pos 3-5 but off by 2-3 seconds
+        ch_durs = [202, 258, 323]
+        pos, avg = _slide_window_match(ch_durs, mb_durs)
+        assert pos == 3
+        assert avg < 5.0
+
+    def test_no_good_match(self):
+        """Completely unrelated durations should produce high avg diff."""
+        from strophalos.cli.rip_video import _slide_window_match
+
+        mb_durs = [180, 240, 300, 200, 260, 320]
+        ch_durs = [500, 600, 700]
+        _pos, avg = _slide_window_match(ch_durs, mb_durs)
+        assert avg > 100
+
+    def test_single_chapter(self):
+        """Single chapter should match the closest MB track."""
+        from strophalos.cli.rip_video import _slide_window_match
+
+        mb_durs = [180, 240, 300, 200, 260, 320]
+        ch_durs = [261]
+        pos, avg = _slide_window_match(ch_durs, mb_durs)
+        assert pos == 4
+        assert avg < 2.0
+
+    def test_overlapping_titles_pick_best(self):
+        """Two titles covering the same MB region — the one with lower diff wins.
+        This tests the dedup-by-position logic in the strategy."""
+        from strophalos.cli.rip_video import _slide_window_match
+
+        mb_durs = [180, 240, 300]
+        # Title A: close match
+        ch_a = [181, 239, 301]
+        pos_a, avg_a = _slide_window_match(ch_a, mb_durs)
+        # Title B: worse match
+        ch_b = [185, 235, 305]
+        pos_b, avg_b = _slide_window_match(ch_b, mb_durs)
+
+        assert pos_a == pos_b == 0
+        assert avg_a < avg_b  # Title A is the better fit

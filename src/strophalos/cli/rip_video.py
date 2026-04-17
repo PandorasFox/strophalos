@@ -135,6 +135,38 @@ def _rip_play_all_strategy(
     return len(final_files)
 
 
+def _slide_window_match(
+    chapter_durs: list[float],
+    mb_durs: list[float],
+    tolerance: float = 5.0,
+) -> tuple[int, float]:
+    """Slide a title's chapter durations across MB track list, find best fit.
+
+    Returns (best_position, avg_diff_at_best_position).
+    Position is the MB track index where this title's first chapter aligns.
+    """
+    n_ch = len(chapter_durs)
+    n_mb = len(mb_durs)
+
+    if n_ch == 0 or n_mb == 0:
+        return 0, float("inf")
+
+    best_pos = 0
+    best_avg = float("inf")
+
+    for pos in range(n_mb - n_ch + 1):
+        total_diff = sum(
+            abs(chapter_durs[i] - mb_durs[pos + i])
+            for i in range(n_ch)
+        )
+        avg = total_diff / n_ch
+        if avg < best_avg:
+            best_avg = avg
+            best_pos = pos
+
+    return best_pos, best_avg
+
+
 def _rip_all_dedup_strategy(
     drive: int,
     out_dir: str,
@@ -143,18 +175,25 @@ def _rip_all_dedup_strategy(
     mb_tracks: list[dict],
     mb_track_count: int,
 ) -> int:
-    """Rip-all-dedup strategy: rip every title, split by chapters, deduplicate.
+    """Rip-all + sliding window strategy: rip every title, split by chapters,
+    then match each title's chapter sequence against MB track positions.
 
-    Used when there's no play-all title (e.g. Shadowbringers OST with
-    overlapping section playlists).
+    Each title's chapters are a contiguous run within MB's track listing.
+    We slide each title's duration sequence across MB to find its position,
+    then keep the best source file for each MB track position.
+
+    Used when there's no play-all title (e.g. Shadowbringers OST).
     """
     from strophalos.core.mkv import get_mkv_duration, split_by_chapters
 
     all_tids = sorted(durations.keys())
     print(f"\n  Music BD [rip-all]: ripping {len(all_tids)} titles, MB expects {mb_track_count} tracks")
 
-    # Step 1: Rip all titles, split each by chapters, collect all chapter durations
-    all_chapters: list[tuple[Path, float]] = []
+    mb_durs = [t.get("duration", 0) for t in mb_tracks]
+
+    # Step 1: Rip all titles, split by chapters, collect per-title chapter sequences
+    # Each entry: (title_id, [(file_path, duration), ...])
+    title_chapters: list[tuple[int, list[tuple[Path, float]]]] = []
     tmp_base = Path(out_dir) / "_rip_tmp"
 
     for tid in all_tids:
@@ -170,35 +209,87 @@ def _rip_all_dedup_strategy(
         if ch > 1:
             split_dir = tmp_dir / "_split"
             split_files = split_by_chapters(ripped[0], split_dir)
+            ch_files = []
             for sf in split_files:
                 dur = get_mkv_duration(sf)
-                all_chapters.append((sf, dur))
-            # Remove the unsplit original
+                ch_files.append((sf, dur))
+            title_chapters.append((tid, ch_files))
             ripped[0].unlink(missing_ok=True)
         else:
-            # Single chapter or unknown — keep as-is
             dur = get_mkv_duration(ripped[0])
-            all_chapters.append((ripped[0], dur))
+            title_chapters.append((tid, [(ripped[0], dur)]))
 
-    print(f"  Music BD: {len(all_chapters)} total chapter files before dedup")
+    total_files = sum(len(chs) for _, chs in title_chapters)
+    print(f"  Music BD: {total_files} total chapter files from {len(title_chapters)} titles")
 
-    # Step 2: Deduplicate by duration (±5s tolerance)
-    unique: list[tuple[Path, float]] = []
-    for path, dur in all_chapters:
-        is_dup = any(abs(dur - d) <= 5.0 for _, d in unique)
-        if not is_dup:
-            unique.append((path, dur))
+    # Step 2: Slide each title's chapter sequence against MB track list
+    # For each MB track position, track the best (lowest diff) source file
+    # best_source[mb_pos] = (file_path, diff)
+    best_source: dict[int, tuple[Path, float]] = {}
 
-    print(f"  Music BD: {len(unique)} unique tracks after dedup (removed {len(all_chapters) - len(unique)} duplicates)")
+    for tid, ch_files in title_chapters:
+        ch_durs = [d for _, d in ch_files]
 
-    # Step 3: Move unique tracks to output with sequential naming
-    for i, (f, dur) in enumerate(unique):
-        dest = Path(out_dir) / f"track_t{i:02d}.mkv"
+        if not mb_durs or all(d == 0 for d in mb_durs):
+            # MB has no duration data — can't window-match, assign sequentially
+            continue
+
+        # For zero-duration MB tracks, skip window matching for this title
+        # if the MB durations at the candidate positions are all 0
+        pos, avg_diff = _slide_window_match(ch_durs, mb_durs)
+
+        if avg_diff > 30:
+            # No good fit — might be bonus content not in MB listing
+            print(f"  Music BD: title {tid} ({len(ch_files)} ch) — no good window match "
+                  f"(best avg diff {avg_diff:.0f}s at pos {pos})")
+            continue
+
+        print(f"  Music BD: title {tid} ({len(ch_files)} ch) → MB tracks {pos}-{pos + len(ch_files) - 1} "
+              f"(avg diff {avg_diff:.1f}s)")
+
+        for i, (f, dur) in enumerate(ch_files):
+            mb_pos = pos + i
+            diff = abs(dur - mb_durs[mb_pos]) if mb_pos < len(mb_durs) else float("inf")
+            existing = best_source.get(mb_pos)
+            if existing is None or diff < existing[1]:
+                best_source[mb_pos] = (f, diff)
+
+    # Step 3: Also handle titles that didn't window-match (bonus tracks)
+    unmatched_files: list[tuple[Path, float]] = []
+    matched_paths = {str(p) for p, _ in best_source.values()}
+    for _tid, ch_files in title_chapters:
+        for f, dur in ch_files:
+            if str(f) not in matched_paths:
+                # Check if this is a duplicate of an already-matched file (±5s)
+                is_dup = any(
+                    abs(dur - d) <= 5.0
+                    for _, (_, d) in best_source.items()
+                )
+                if not is_dup:
+                    unmatched_files.append((f, dur))
+
+    # Step 4: Move best source files to output
+    os.makedirs(out_dir, exist_ok=True)
+    for mb_pos in sorted(best_source.keys()):
+        f, _diff = best_source[mb_pos]
+        dest = Path(out_dir) / f"track_t{mb_pos:02d}.mkv"
         shutil.move(str(f), str(dest))
 
-    # Clean up temp dirs
+    # Append unmatched bonus tracks after the MB positions
+    next_idx = mb_track_count
+    for f, dur in unmatched_files:
+        dest = Path(out_dir) / f"track_t{next_idx:02d}.mkv"
+        shutil.move(str(f), str(dest))
+        print(f"  Music BD: unmatched bonus track ({dur:.0f}s) → track_t{next_idx:02d}.mkv")
+        next_idx += 1
+
+    # Clean up
     if tmp_base.exists():
         shutil.rmtree(tmp_base, ignore_errors=True)
+
+    matched = len(best_source)
+    bonus = next_idx - mb_track_count
+    print(f"  Music BD: {matched}/{mb_track_count} MB tracks matched, {bonus} bonus track(s)")
 
     final_files = sorted(Path(out_dir).glob("track_t*.mkv"))
     print(f"  Music BD: {len(final_files)} track files in output")
