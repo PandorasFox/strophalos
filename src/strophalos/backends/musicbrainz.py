@@ -248,29 +248,28 @@ def score_musicbrainz(disc_label: str | None, durations: dict[int, int]) -> tupl
 
     # Total duration of all MB tracks
     mb_total = sum(t["duration"] for t in tracks)
-    if mb_total == 0:
-        return 0.0, None
 
-    # For audio BDs, makemkv groups tracks into titles. The longest title
-    # is usually the play-all (all tracks concatenated). Compare that against
-    # the MB total, OR compare the sum of all titles (minus play-all duplicates).
     title_durs = sorted(durations.values(), reverse=True)
 
     # Strategy 1: longest title (play-all) vs MB total
-    play_all_dur = title_durs[0]
-    play_all_diff = abs(play_all_dur - mb_total) / mb_total if mb_total > 0 else 1.0
+    best_diff = 1.0
+    method = "none"
+    if mb_total > 0:
+        play_all_dur = title_durs[0]
+        play_all_diff = abs(play_all_dur - mb_total) / mb_total
 
-    # Strategy 2: sum of non-play-all titles vs MB total
-    # (if play-all exists, the other titles are sections that should sum to ~play-all)
-    non_play_all = title_durs[1:] if len(title_durs) > 1 else title_durs
-    sections_total = sum(non_play_all)
-    sections_diff = abs(sections_total - mb_total) / mb_total if mb_total > 0 else 1.0
+        # Strategy 2: sum of non-play-all titles vs MB total
+        non_play_all = title_durs[1:] if len(title_durs) > 1 else title_durs
+        sections_total = sum(non_play_all)
+        sections_diff = abs(sections_total - mb_total) / mb_total
 
-    best_diff = min(play_all_diff, sections_diff)
-    method = "play-all" if play_all_diff <= sections_diff else "sections"
+        if play_all_diff <= sections_diff:
+            best_diff, method = play_all_diff, "play-all"
+        else:
+            best_diff, method = sections_diff, "sections"
 
     if best_diff < 0.02:  # within 2%
-        score = max(0.0, 1.0 - best_diff * 50)  # 0% diff = 1.0, 2% diff = 0.0
+        score = max(0.0, 1.0 - best_diff * 50)
         release_info = {
             "artist": artist,
             "title": rel_title,
@@ -282,6 +281,30 @@ def score_musicbrainz(disc_label: str | None, durations: dict[int, int]) -> tupl
         print(
             f"  MusicBrainz: matched '{query}' → {artist} - {rel_title}"
             f" ({len(tracks)} tracks, {method} match, {best_diff:.1%} off)"
+        )
+        return score, release_info
+
+    # Strategy 3: Blu-ray title match without duration confirmation.
+    # If we found a Blu-ray release with a matching title, that's a strong
+    # signal even if durations don't align (common with multi-section discs
+    # that have no play-all and heavy duplication across titles).
+    is_bd = any(
+        "blu-ray" in (m.get("format") or "").lower()
+        for m in best.get("media", [])
+    )
+    if is_bd:
+        score = 0.75
+        release_info = {
+            "artist": artist,
+            "title": rel_title,
+            "id": rel_id,
+            "track_count": len(tracks),
+            "match_method": "title-match",
+            "duration_diff_pct": f"{best_diff:.0%}",
+        }
+        print(
+            f"  MusicBrainz: matched '{query}' → {artist} - {rel_title}"
+            f" ({len(tracks)} tracks, Blu-ray title match, no duration confirmation)"
         )
         return score, release_info
 

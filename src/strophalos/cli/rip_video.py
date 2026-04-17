@@ -33,24 +33,50 @@ def _rip_music_bd(
     to_rip: list[int],
     mb_metadata: dict,
 ) -> int:
-    """Rip an audio Blu-ray: rip play-all title, split by chapters, match to MB tracks.
+    """Rip an audio Blu-ray: handles both play-all and rip-all-dedup strategies.
 
     Returns the number of track files produced.
     """
     from strophalos.core.mkv import get_mkv_duration, split_by_chapters
 
-    play_all_tid = to_rip[0]
     mb_tracks = mb_metadata.get("tracks", [])
     mb_track_count = mb_metadata.get("track_count", len(mb_tracks))
+    match_method = mb_metadata.get("match_method", "")
 
-    print(f"\n  Music BD: ripping play-all title {play_all_tid} "
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Decide strategy based on how the MB match was made
+    has_play_all = match_method == "play-all"
+
+    if has_play_all:
+        return _rip_play_all_strategy(
+            drive, out_dir, durations, chapters, to_rip, mb_tracks, mb_track_count,
+        )
+    else:
+        return _rip_all_dedup_strategy(
+            drive, out_dir, durations, chapters, mb_tracks, mb_track_count,
+        )
+
+
+def _rip_play_all_strategy(
+    drive: int,
+    out_dir: str,
+    durations: dict[int, int],
+    chapters: dict[int, int],
+    to_rip: list[int],
+    mb_tracks: list[dict],
+    mb_track_count: int,
+) -> int:
+    """Play-all strategy: rip the play-all title, split, then hunt for bonus tracks."""
+    from strophalos.core.mkv import get_mkv_duration, split_by_chapters
+
+    play_all_tid = to_rip[0]
+
+    print(f"\n  Music BD [play-all]: ripping title {play_all_tid} "
           f"({chapters.get(play_all_tid, '?')} chapters, MB expects {mb_track_count} tracks)")
 
-    # Step 1: Rip the play-all title
-    os.makedirs(out_dir, exist_ok=True)
     rip_titles(drive, [play_all_tid], out_dir)
 
-    # Find the ripped MKV
     ripped = sorted(Path(out_dir).glob("*_t*.mkv"))
     if not ripped:
         print("  Music BD: no MKV produced from play-all rip")
@@ -59,7 +85,6 @@ def _rip_music_bd(
     play_all_mkv = ripped[0]
     print(f"  Music BD: splitting {play_all_mkv.name} by chapters...")
 
-    # Step 2: Split by chapters into a temp dir, then rename to final pattern
     split_dir = Path(out_dir) / "_split_tmp"
     split_files = split_by_chapters(play_all_mkv, split_dir, prefix="ch")
     print(f"  Music BD: split into {len(split_files)} chapter files")
@@ -68,23 +93,19 @@ def _rip_music_bd(
         print("  Music BD: chapter split produced no files")
         return 0
 
-    # Step 3: Get durations of split files
     split_durs: list[tuple[Path, float]] = []
     for f in split_files:
         dur = get_mkv_duration(f)
         split_durs.append((f, dur))
 
-    # Step 4: Rename chapter files sequentially
+    # Rename chapter files sequentially
     for i, (f, _dur) in enumerate(split_durs):
         dest = Path(out_dir) / f"track_t{i:02d}.mkv"
         shutil.move(str(f), str(dest))
 
     print(f"  Music BD: {len(split_durs)} tracks from play-all")
 
-    # Step 5: Hunt remaining titles for missing tracks
-    # Only rip titles that aren't subsets of the play-all (i.e. titles whose
-    # chapters aren't already covered). Titles 0-5 are typically disc "sections"
-    # that duplicate parts of the play-all. Title 7 etc. may be bonus tracks.
+    # Hunt for bonus tracks in non-subset titles
     play_all_ch = chapters.get(play_all_tid, 0)
     play_all_dur = durations.get(play_all_tid, 0)
 
@@ -93,8 +114,6 @@ def _rip_music_bd(
         if tid == play_all_tid:
             continue
         ch = chapters.get(tid, 0)
-        # A title is likely a subset of the play-all if its duration fits
-        # within the play-all and its chapters are fewer. Skip those.
         if ch > 0 and dur < play_all_dur and ch < play_all_ch:
             continue
         remaining_tids.append(tid)
@@ -106,10 +125,80 @@ def _rip_music_bd(
         print(f"  Music BD: play-all has {len(split_durs)} chapters but MB expects "
               f"{mb_track_count} — no remaining titles to hunt")
 
-    # Clean up: remove play-all MKV and temp split dir
+    # Clean up
     play_all_mkv.unlink(missing_ok=True)
     if split_dir.exists():
         shutil.rmtree(split_dir, ignore_errors=True)
+
+    final_files = sorted(Path(out_dir).glob("track_t*.mkv"))
+    print(f"  Music BD: {len(final_files)} track files in output")
+    return len(final_files)
+
+
+def _rip_all_dedup_strategy(
+    drive: int,
+    out_dir: str,
+    durations: dict[int, int],
+    chapters: dict[int, int],
+    mb_tracks: list[dict],
+    mb_track_count: int,
+) -> int:
+    """Rip-all-dedup strategy: rip every title, split by chapters, deduplicate.
+
+    Used when there's no play-all title (e.g. Shadowbringers OST with
+    overlapping section playlists).
+    """
+    from strophalos.core.mkv import get_mkv_duration, split_by_chapters
+
+    all_tids = sorted(durations.keys())
+    print(f"\n  Music BD [rip-all]: ripping {len(all_tids)} titles, MB expects {mb_track_count} tracks")
+
+    # Step 1: Rip all titles, split each by chapters, collect all chapter durations
+    all_chapters: list[tuple[Path, float]] = []
+    tmp_base = Path(out_dir) / "_rip_tmp"
+
+    for tid in all_tids:
+        ch = chapters.get(tid, 0)
+        print(f"  Music BD: ripping title {tid} ({ch} chapters)...", flush=True)
+        tmp_dir = tmp_base / f"t{tid}"
+        rip_titles(drive, [tid], str(tmp_dir))
+
+        ripped = sorted(tmp_dir.glob("*_t*.mkv"))
+        if not ripped:
+            continue
+
+        if ch > 1:
+            split_dir = tmp_dir / "_split"
+            split_files = split_by_chapters(ripped[0], split_dir)
+            for sf in split_files:
+                dur = get_mkv_duration(sf)
+                all_chapters.append((sf, dur))
+            # Remove the unsplit original
+            ripped[0].unlink(missing_ok=True)
+        else:
+            # Single chapter or unknown — keep as-is
+            dur = get_mkv_duration(ripped[0])
+            all_chapters.append((ripped[0], dur))
+
+    print(f"  Music BD: {len(all_chapters)} total chapter files before dedup")
+
+    # Step 2: Deduplicate by duration (±5s tolerance)
+    unique: list[tuple[Path, float]] = []
+    for path, dur in all_chapters:
+        is_dup = any(abs(dur - d) <= 5.0 for _, d in unique)
+        if not is_dup:
+            unique.append((path, dur))
+
+    print(f"  Music BD: {len(unique)} unique tracks after dedup (removed {len(all_chapters) - len(unique)} duplicates)")
+
+    # Step 3: Move unique tracks to output with sequential naming
+    for i, (f, dur) in enumerate(unique):
+        dest = Path(out_dir) / f"track_t{i:02d}.mkv"
+        shutil.move(str(f), str(dest))
+
+    # Clean up temp dirs
+    if tmp_base.exists():
+        shutil.rmtree(tmp_base, ignore_errors=True)
 
     final_files = sorted(Path(out_dir).glob("track_t*.mkv"))
     print(f"  Music BD: {len(final_files)} track files in output")
@@ -146,7 +235,6 @@ def _rip_remaining_titles(
         split_files = split_by_chapters(ripped[0], split_dir)
 
         if split_files and len(split_files) > 1:
-            # Multiple chapters — each is a track
             for sf in split_files:
                 dur = get_mkv_duration(sf)
                 dest = Path(out_dir) / f"track_t{next_idx:02d}.mkv"
@@ -154,7 +242,6 @@ def _rip_remaining_titles(
                 print(f"  Music BD: bonus track from title {tid} ({dur:.0f}s) → track_t{next_idx:02d}.mkv")
                 next_idx += 1
         else:
-            # Single chapter or no chapters — title is one track
             dur = get_mkv_duration(ripped[0])
             dest = Path(out_dir) / f"track_t{next_idx:02d}.mkv"
             shutil.move(str(ripped[0]), str(dest))
