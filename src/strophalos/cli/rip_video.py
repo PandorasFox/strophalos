@@ -74,27 +74,37 @@ def _rip_music_bd(
         dur = get_mkv_duration(f)
         split_durs.append((f, dur))
 
-    # Step 4: Match against MB tracks by duration if we have track detail
-    matched_count = 0
-    if mb_tracks:
-        matched_count = _match_and_rename_tracks(split_durs, mb_tracks, Path(out_dir))
-    else:
-        # No track detail — just rename sequentially
-        for i, (f, _dur) in enumerate(split_durs):
-            dest = Path(out_dir) / f"track_t{i:02d}.mkv"
-            shutil.move(str(f), str(dest))
-            matched_count += 1
+    # Step 4: Rename chapter files sequentially
+    for i, (f, _dur) in enumerate(split_durs):
+        dest = Path(out_dir) / f"track_t{i:02d}.mkv"
+        shutil.move(str(f), str(dest))
 
-    # Step 5: Check for unmatched MB tracks and hunt in remaining titles
-    if mb_tracks and matched_count < len(mb_tracks):
-        unmatched_mb = _find_unmatched_mb_tracks(mb_tracks, Path(out_dir))
-        if unmatched_mb:
-            print(f"  Music BD: {len(unmatched_mb)} MB track(s) unmatched, "
-                  f"checking remaining titles...")
-            _hunt_remaining_titles(
-                drive, out_dir, durations, chapters,
-                play_all_tid, unmatched_mb,
-            )
+    print(f"  Music BD: {len(split_durs)} tracks from play-all")
+
+    # Step 5: Hunt remaining titles for missing tracks
+    # Only rip titles that aren't subsets of the play-all (i.e. titles whose
+    # chapters aren't already covered). Titles 0-5 are typically disc "sections"
+    # that duplicate parts of the play-all. Title 7 etc. may be bonus tracks.
+    play_all_ch = chapters.get(play_all_tid, 0)
+    play_all_dur = durations.get(play_all_tid, 0)
+
+    remaining_tids = []
+    for tid, dur in sorted(durations.items()):
+        if tid == play_all_tid:
+            continue
+        ch = chapters.get(tid, 0)
+        # A title is likely a subset of the play-all if its duration fits
+        # within the play-all and its chapters are fewer. Skip those.
+        if ch > 0 and dur < play_all_dur and ch < play_all_ch:
+            continue
+        remaining_tids.append(tid)
+
+    if remaining_tids:
+        print(f"  Music BD: {len(remaining_tids)} non-subset title(s) to check: {remaining_tids}")
+        _rip_remaining_titles(drive, out_dir, remaining_tids, len(split_durs))
+    elif len(split_durs) < mb_track_count:
+        print(f"  Music BD: play-all has {len(split_durs)} chapters but MB expects "
+              f"{mb_track_count} — no remaining titles to hunt")
 
     # Clean up: remove play-all MKV and temp split dir
     play_all_mkv.unlink(missing_ok=True)
@@ -106,84 +116,24 @@ def _rip_music_bd(
     return len(final_files)
 
 
-def _match_and_rename_tracks(
-    split_durs: list[tuple[Path, float]],
-    mb_tracks: list[dict],
-    out_dir: Path,
-) -> int:
-    """Match chapter-split files to MB tracks by sorted duration. Rename matched files."""
-    from strophalos.core.fs import sanitize_filename
-
-    # Sort both by duration
-    files_by_dur = sorted(split_durs, key=lambda x: x[1])
-    tracks_by_dur = sorted(enumerate(mb_tracks), key=lambda x: x[1].get("duration", 0))
-
-    matched = 0
-    # Pair up — if counts differ, zip stops at the shorter
-    for (split_file, file_dur), (track_idx, track) in zip(files_by_dur, tracks_by_dur):
-        track_dur = track.get("duration", 0)
-        diff = abs(file_dur - track_dur)
-
-        if diff > 10:  # more than 10s off — not a match
-            print(f"  Music BD: skipping {split_file.name} ({file_dur:.0f}s) "
-                  f"— too far from track {track_idx} ({track_dur:.0f}s)")
-            continue
-
-        # Rename to sequential pattern for identify-music compatibility
-        dest = out_dir / f"track_t{track_idx:02d}.mkv"
-        shutil.move(str(split_file), str(dest))
-        matched += 1
-
-    # Move any unmatched split files with sequential numbering
-    remaining_split = sorted(out_dir.parent.rglob("_split_tmp/ch-*.mkv"))
-    next_idx = len(mb_tracks)
-    for f in remaining_split:
-        dest = out_dir / f"track_t{next_idx:02d}.mkv"
-        shutil.move(str(f), str(dest))
-        next_idx += 1
-
-    return matched
-
-
-def _find_unmatched_mb_tracks(mb_tracks: list[dict], out_dir: Path) -> list[dict]:
-    """Find MB tracks that don't have a corresponding file in the output dir."""
-    existing = {f.name for f in out_dir.glob("track_t*.mkv")}
-    unmatched = []
-    for i, track in enumerate(mb_tracks):
-        expected = f"track_t{i:02d}.mkv"
-        if expected not in existing:
-            unmatched.append(track)
-    return unmatched
-
-
-def _hunt_remaining_titles(
+def _rip_remaining_titles(
     drive: int,
     out_dir: str,
-    durations: dict[int, int],
-    chapters: dict[int, int],
-    play_all_tid: int,
-    unmatched_mb: list[dict],
+    title_ids: list[int],
+    start_idx: int,
 ) -> None:
-    """Rip remaining titles and try to match their chapters against unmatched MB tracks."""
+    """Rip non-subset titles, split by chapters, and append to output.
+
+    These are titles that aren't contained within the play-all — typically
+    bonus tracks, alternate mixes, or content not on the main playlist.
+    """
     from strophalos.core.mkv import get_mkv_duration, split_by_chapters
 
-    unmatched_durs = [t.get("duration", 0) for t in unmatched_mb]
+    next_idx = start_idx
 
-    for tid, title_dur in sorted(durations.items()):
-        if tid == play_all_tid:
-            continue
-        ch_count = chapters.get(tid, 0)
-        if ch_count < 1:
-            continue
-
-        # Estimate: could this title contain any of the missing tracks?
-        avg_ch_dur = title_dur / ch_count if ch_count > 0 else title_dur
-        possible_match = any(abs(avg_ch_dur - d) < d * 0.5 for d in unmatched_durs if d > 0)
-        if not possible_match:
-            continue
-
-        print(f"  Music BD: ripping title {tid} ({ch_count} chapters) to search for missing tracks...")
-        tmp_dir = Path(out_dir) / f"_hunt_t{tid}"
+    for tid in title_ids:
+        print(f"  Music BD: ripping bonus title {tid}...")
+        tmp_dir = Path(out_dir) / f"_bonus_t{tid}"
         rip_titles(drive, [tid], str(tmp_dir))
 
         ripped = sorted(tmp_dir.glob("*_t*.mkv"))
@@ -191,32 +141,30 @@ def _hunt_remaining_titles(
             shutil.rmtree(tmp_dir, ignore_errors=True)
             continue
 
-        # Split by chapters
+        # If title has chapters, split into individual tracks
         split_dir = tmp_dir / "_split"
         split_files = split_by_chapters(ripped[0], split_dir)
 
-        for sf in split_files:
-            sf_dur = get_mkv_duration(sf)
-            # Check against each unmatched MB track
-            for mb_track in list(unmatched_mb):
-                mb_dur = mb_track.get("duration", 0)
-                if mb_dur > 0 and abs(sf_dur - mb_dur) < 5:
-                    # Found it
-                    idx = unmatched_mb.index(mb_track)
-                    # Find the original MB index for naming
-                    # (this is the track's position in the full track list)
-                    pos = mb_track.get("position", "?")
-                    print(f"  Music BD: found missing track {pos} in title {tid}")
-                    dest = Path(out_dir) / f"track_t{99 - len(unmatched_mb) + idx:02d}.mkv"
-                    shutil.move(str(sf), str(dest))
-                    unmatched_mb.remove(mb_track)
-                    break
+        if split_files and len(split_files) > 1:
+            # Multiple chapters — each is a track
+            for sf in split_files:
+                dur = get_mkv_duration(sf)
+                dest = Path(out_dir) / f"track_t{next_idx:02d}.mkv"
+                shutil.move(str(sf), str(dest))
+                print(f"  Music BD: bonus track from title {tid} ({dur:.0f}s) → track_t{next_idx:02d}.mkv")
+                next_idx += 1
+        else:
+            # Single chapter or no chapters — title is one track
+            dur = get_mkv_duration(ripped[0])
+            dest = Path(out_dir) / f"track_t{next_idx:02d}.mkv"
+            shutil.move(str(ripped[0]), str(dest))
+            print(f"  Music BD: bonus track from title {tid} ({dur:.0f}s) → track_t{next_idx:02d}.mkv")
+            next_idx += 1
 
-        # Clean up hunt dir
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-        if not unmatched_mb:
-            break
+    found = next_idx - start_idx
+    print(f"  Music BD: {found} bonus track(s) from {len(title_ids)} title(s)")
 
 
 def rip_video_disc(
@@ -287,15 +235,16 @@ def rip_video_disc(
 
     # Music BD: special chapter-split rip flow
     if disc_type == "music" and mb_metadata:
-        # Fetch full track detail from MB for matching
-        from strophalos.backends.musicbrainz import search_release
+        # Fetch full track detail from MB by release ID
+        from strophalos.backends.musicbrainz import _fetch_release_detail, _get_artist, _get_release_tracks
 
         mb_tracks = mb_metadata.get("tracks")
-        if not mb_tracks:
-            # score_musicbrainz doesn't fetch full track detail — search_release does
-            release = search_release(disc_label or "", list(durations.values()), prefer_bluray=True)
-            if release:
-                mb_metadata["tracks"] = release["tracks"]
+        if not mb_tracks and mb_metadata.get("id"):
+            release_id = mb_metadata["id"]
+            tracks = _get_release_tracks({}, release_id)
+            if tracks:
+                mb_metadata["tracks"] = tracks
+                print(f"  Music BD: fetched {len(tracks)} track details from MB release {release_id}")
 
         track_count = _rip_music_bd(drive, out_dir, durations, chapters, to_rip, mb_metadata)
     else:
