@@ -142,14 +142,6 @@ def rip_audio_cd(device: str, output: str = "/output-cd") -> int:
     result = subprocess.run(cmd)
     rc = result.returncode
 
-    # Retry with --unknown if whipper couldn't retrieve metadata
-    if rc != 0:
-        print("  Retrying with --unknown...", flush=True)
-        cmd_retry = cmd.copy()
-        cmd_retry.insert(cmd_retry.index("rip") + 1, "--unknown")
-        result = subprocess.run(cmd_retry)
-        rc = result.returncode
-
     # Post-rip: flatten multi-disc directories
     if disc_total > 1:
         _flatten_multi_disc_dirs(Path(output))
