@@ -171,25 +171,19 @@ def rip_audio_cd(device: str, output: str = "/output-cd") -> int:
 
         notify("CD ripped", "\n".join(lines))
     elif rc != 0:
-        stderr = result.stderr or ""
+        # Build the submission/attach URL from discid TOC data
+        submission_url = info.get("submission_url", "")
+        if submission_url:
+            import re as _re
 
-        if "unable to retrieve disc metadata" in stderr:
-            # Use the submission URL from discid (has full TOC params),
-            # rewritten to point at upstream musicbrainz.org
-            submission_url = info.get("submission_url", "")
-            if submission_url:
-                import re as _re
-
-                attach_url = _re.sub(r"https?://[^/]+", "https://musicbrainz.org", submission_url)
-            else:
-                attach_url = ""
-            if attach_url:
-                msg = f"Disc TOC not found in MusicBrainz.\n\nAdd this disc:\n{attach_url}"
-            else:
-                msg = "Disc TOC not found in MusicBrainz."
-            notify("CD rip skipped — TOC not mapped", msg, error=True)
+            attach_url = _re.sub(r"https?://[^/]+", "https://musicbrainz.org", submission_url)
         else:
-            notify("CD rip failed", f"{artist or 'Unknown'} - {title or 'Unknown'} (exit {rc})", error=True)
+            attach_url = ""
+
+        msg = f"{artist or 'Unknown'} - {title or 'Unknown'} (exit {rc})"
+        if attach_url:
+            msg += f"\n\nSubmit/attach TOC:\n{attach_url}"
+        notify("CD rip failed", msg, error=True)
 
     return rc
 
