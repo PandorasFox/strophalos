@@ -75,6 +75,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-libdiscid \
         python3-cdio \
         python3-dev \
+        ffmpeg \
         flac \
         libsndfile1 \
         libsndfile1-dev \

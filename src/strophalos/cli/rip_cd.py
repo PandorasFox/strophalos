@@ -192,7 +192,10 @@ def rip_audio_cd(device: str, output: str = "/output-cd") -> int:
         if "unable to retrieve disc metadata" in stderr:
             # Disc TOC not in MusicBrainz — build the attach URL
             attach_url = f"https://musicbrainz.org/cdtoc/attach?id={disc_id}" if disc_id else ""
-            msg = f"Disc TOC not found in MusicBrainz.\n\nAdd this disc:\n{attach_url}" if attach_url else "Disc TOC not found in MusicBrainz."
+            if attach_url:
+                msg = f"Disc TOC not found in MusicBrainz.\n\nAdd this disc:\n{attach_url}"
+            else:
+                msg = "Disc TOC not found in MusicBrainz."
             notify("CD rip skipped — TOC not mapped", msg, error=True)
         else:
             notify("CD rip failed", f"{artist or 'Unknown'} - {title or 'Unknown'} (exit {rc})", error=True)

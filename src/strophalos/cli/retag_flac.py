@@ -10,8 +10,6 @@ Can be run as a post-rip step or against existing rip archives.
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import subprocess
 from pathlib import Path
 
@@ -171,9 +169,7 @@ def retag_directory(directory: Path, dry_run: bool = False) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Re-tag FLACs with English names from MusicBrainz"
-    )
+    parser = argparse.ArgumentParser(description="Re-tag FLACs with English names from MusicBrainz")
     parser.add_argument("path", help="FLAC file or directory to re-tag")
     parser.add_argument("--dry-run", action="store_true", help="Show what would change without writing")
     args = parser.parse_args()

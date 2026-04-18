@@ -10,11 +10,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 from pathlib import Path
 
-from strophalos.backends.musicbrainz import _mb_base, _get_release_tracks, get_english_name
+from strophalos.backends.musicbrainz import _get_release_tracks, _mb_base, get_english_name
 from strophalos.core.fs import sanitize_filename
 from strophalos.core.http import get_json
 
@@ -37,13 +36,15 @@ def _fetch_track_metadata(release_id: str) -> list[dict] | None:
         else:
             en_title = title
 
-        enriched.append({
-            "position": t.get("position", "?"),
-            "title": en_title,
-            "original_title": title,
-            "recording_id": rec_id,
-            "duration": t.get("duration", 0),
-        })
+        enriched.append(
+            {
+                "position": t.get("position", "?"),
+                "title": en_title,
+                "original_title": title,
+                "recording_id": rec_id,
+                "duration": t.get("duration", 0),
+            }
+        )
 
     return enriched
 
@@ -140,10 +141,9 @@ def convert_bd_audio(disc_dir: Path, output_dir: Path | None = None, dry_run: bo
     manifest = json.loads(manifest_path.read_text())
     release_id = manifest.get("musicbrainz_release_id", "")
     if not release_id:
-        print(f"No MusicBrainz release ID in manifest")
+        print("No MusicBrainz release ID in manifest")
         return 0
 
-    mb_track_count = manifest.get("mb_track_count", 0)
     album_title = manifest.get("musicbrainz_title", manifest.get("label", "Unknown"))
 
     print(f"Fetching track metadata for release {release_id}...")
@@ -207,9 +207,7 @@ def convert_bd_audio(disc_dir: Path, output_dir: Path | None = None, dry_run: bo
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Convert audio BD MKVs to tagged FLACs"
-    )
+    parser = argparse.ArgumentParser(description="Convert audio BD MKVs to tagged FLACs")
     parser.add_argument("path", help="Disc directory containing track_tNN.mkv files and .rip-manifest.json")
     parser.add_argument("-o", "--output", default=None, help="Output directory for FLACs (default: same as input)")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be converted without writing")
