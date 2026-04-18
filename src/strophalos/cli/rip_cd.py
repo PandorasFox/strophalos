@@ -30,16 +30,21 @@ def _query_disc_info(device: str) -> dict:
         # Configure musicbrainzngs
         musicbrainzngs.set_useragent("rip-cd", "1.0", "local")
 
-        # Try to use whipper's configured MusicBrainz server
-        try:
-            from whipper.common.config import Config
+        # Use MB_SERVER env var, fall back to whipper config, then default
+        mb_server = os.environ.get("MB_SERVER", "")
+        if mb_server:
+            mb_server = mb_server.replace("http://", "").replace("https://", "")
+            musicbrainzngs.set_hostname(mb_server)
+        else:
+            try:
+                from whipper.common.config import Config
 
-            conf = Config()
-            server = conf._parser.get("musicbrainz", "server")
-            server = server.replace("http://", "").replace("https://", "")
-            musicbrainzngs.set_hostname(server)
-        except Exception:
-            pass
+                conf = Config()
+                server = conf._parser.get("musicbrainz", "server")
+                server = server.replace("http://", "").replace("https://", "")
+                musicbrainzngs.set_hostname(server)
+            except Exception:
+                pass
 
         disc = discid.read(device)
         info["disc_id"] = disc.id
