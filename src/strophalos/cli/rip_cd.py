@@ -124,13 +124,14 @@ def rip_audio_cd(device: str, output: str = "/output-cd") -> int:
     else:
         notify("Ripping CD", "(unknown disc)")
 
-    # Run whipper (capture stderr for failure diagnostics)
+    # Run whipper (--cdr allows CD-R discs without extra prompting)
     cmd = [
         "whipper",
         "cd",
         "-d",
         device,
         "rip",
+        "--cdr",
         "-O",
         output,
         "--track-template",
@@ -146,12 +147,19 @@ def rip_audio_cd(device: str, output: str = "/output-cd") -> int:
         for line in result.stderr.strip().splitlines():
             print(f"  whipper: {line}", flush=True)
 
-    # Retry with --unknown if whipper couldn't retrieve metadata
-    # (can happen even when the release exists — whipper parsing bugs)
-    if rc != 0 and result.stderr and "unable to retrieve disc metadata" in result.stderr:
-        print("  Retrying with --unknown...", flush=True)
+    # Retry with extra flags if whipper refused to rip
+    retry_flags: list[str] = []
+    if result.stderr:
+        if "unable to retrieve disc metadata" in result.stderr:
+            retry_flags.append("--unknown")
+        if "seems to be a CD-R" in result.stderr:
+            retry_flags.append("--cdr")
+
+    if rc != 0 and retry_flags:
+        print(f"  Retrying with {' '.join(retry_flags)}...", flush=True)
         cmd_retry = cmd.copy()
-        cmd_retry.insert(cmd_retry.index("rip") + 1, "--unknown")
+        for flag in retry_flags:
+            cmd_retry.insert(cmd_retry.index("rip") + 1, flag)
         result = subprocess.run(cmd_retry, stderr=subprocess.PIPE, text=True)
         rc = result.returncode
         if result.stderr:
