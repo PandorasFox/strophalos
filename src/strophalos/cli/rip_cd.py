@@ -139,32 +139,16 @@ def rip_audio_cd(device: str, output: str = "/output-cd") -> int:
         "--disc-template",
         disc_tpl,
     ]
-    result = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
+    result = subprocess.run(cmd)
     rc = result.returncode
 
-    # Print stderr for logging (whipper progress goes to stdout)
-    if result.stderr:
-        for line in result.stderr.strip().splitlines():
-            print(f"  whipper: {line}", flush=True)
-
-    # Retry with extra flags if whipper refused to rip
-    retry_flags: list[str] = []
-    if result.stderr:
-        if "unable to retrieve disc metadata" in result.stderr:
-            retry_flags.append("--unknown")
-        if "seems to be a CD-R" in result.stderr:
-            retry_flags.append("--cdr")
-
-    if rc != 0 and retry_flags:
-        print(f"  Retrying with {' '.join(retry_flags)}...", flush=True)
+    # Retry with --unknown if whipper couldn't retrieve metadata
+    if rc != 0:
+        print("  Retrying with --unknown...", flush=True)
         cmd_retry = cmd.copy()
-        for flag in retry_flags:
-            cmd_retry.insert(cmd_retry.index("rip") + 1, flag)
-        result = subprocess.run(cmd_retry, stderr=subprocess.PIPE, text=True)
+        cmd_retry.insert(cmd_retry.index("rip") + 1, "--unknown")
+        result = subprocess.run(cmd_retry)
         rc = result.returncode
-        if result.stderr:
-            for line in result.stderr.strip().splitlines():
-                print(f"  whipper: {line}", flush=True)
 
     # Post-rip: flatten multi-disc directories
     if disc_total > 1:
