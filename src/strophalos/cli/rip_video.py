@@ -206,9 +206,9 @@ def _rip_all_dedup_strategy(
     title_chapters: list[tuple[int, list[tuple[Path, float]]]] = []
     tmp_base = Path(out_dir) / "_rip_tmp"
 
-    for tid in all_tids:
+    for idx, tid in enumerate(all_tids):
         ch = chapters.get(tid, 0)
-        print(f"  Music BD: ripping title {tid} ({ch} chapters)...", flush=True)
+        print(f"  Music BD: ripping title {tid} ({idx + 1}/{len(all_tids)}, {ch} chapters)...", flush=True)
         tmp_dir = tmp_base / f"t{tid}"
         rip_titles(drive, [tid], str(tmp_dir))
 
