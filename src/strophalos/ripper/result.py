@@ -15,3 +15,5 @@ class RipResult:
     title_count: int
     disc_id: str | None = None
     label: str = ""
+    # Music BD metadata (set by rip_video when disc_type == "music")
+    mb_metadata: dict | None = None

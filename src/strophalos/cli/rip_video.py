@@ -254,33 +254,60 @@ def _rip_all_dedup_strategy(
             if existing is None or diff < existing[1]:
                 best_source[mb_pos] = (f, diff)
 
-    # Step 3: Also handle titles that didn't window-match (bonus tracks)
+    # Step 3: Collect unmatched files (not assigned to any MB position)
     unmatched_files: list[tuple[Path, float]] = []
     matched_paths = {str(p) for p, _ in best_source.values()}
     for _tid, ch_files in title_chapters:
         for f, dur in ch_files:
             if str(f) not in matched_paths:
-                # Check if this is a duplicate of an already-matched file (±5s)
-                is_dup = any(
-                    abs(dur - d) <= 5.0
-                    for _, (_, d) in best_source.items()
-                )
-                if not is_dup:
-                    unmatched_files.append((f, dur))
+                unmatched_files.append((f, dur))
 
-    # Step 4: Move best source files to output
+    # Step 4: Fill remaining MB gaps by duration matching against unmatched pool.
+    # For each unfilled MB position, find the closest-duration unmatched file.
+    unfilled = [pos for pos in range(mb_track_count) if pos not in best_source]
+    if unfilled and unmatched_files:
+        print(f"  Music BD: filling {len(unfilled)} remaining MB gaps by duration...")
+        used_paths: set[str] = set()
+        for mb_pos in unfilled:
+            target_dur = mb_durs[mb_pos]
+            # Find closest unmatched file by duration
+            best_f = None
+            best_d = float("inf")
+            for f, dur in unmatched_files:
+                if str(f) in used_paths:
+                    continue
+                d = abs(dur - target_dur)
+                if d < best_d:
+                    best_d = d
+                    best_f = f
+            if best_f is not None:
+                best_source[mb_pos] = (best_f, best_d)
+                used_paths.add(str(best_f))
+                print(f"  Music BD: gap fill MB pos {mb_pos} ({target_dur:.0f}s) ← {best_f.name} (diff {best_d:.1f}s)")
+
+        # Update unmatched list
+        unmatched_files = [(f, d) for f, d in unmatched_files if str(f) not in used_paths]
+
+    # Deduplicate remaining unmatched files against matched (±5s)
+    truly_unmatched: list[tuple[Path, float]] = []
+    for f, dur in unmatched_files:
+        is_dup = any(abs(dur - d) <= 5.0 for _, (_, d) in best_source.items())
+        if not is_dup:
+            truly_unmatched.append((f, dur))
+
+    # Step 5: Move best source files to output
     os.makedirs(out_dir, exist_ok=True)
     for mb_pos in sorted(best_source.keys()):
         f, _diff = best_source[mb_pos]
         dest = Path(out_dir) / f"track_t{mb_pos:02d}.mkv"
         shutil.move(str(f), str(dest))
 
-    # Append unmatched bonus tracks after the MB positions
+    # Append truly unique bonus tracks after the MB positions
     next_idx = mb_track_count
-    for f, dur in unmatched_files:
+    for f, dur in truly_unmatched:
         dest = Path(out_dir) / f"track_t{next_idx:02d}.mkv"
         shutil.move(str(f), str(dest))
-        print(f"  Music BD: unmatched bonus track ({dur:.0f}s) → track_t{next_idx:02d}.mkv")
+        print(f"  Music BD: bonus track ({dur:.0f}s) → track_t{next_idx:02d}.mkv")
         next_idx += 1
 
     # Clean up
@@ -453,6 +480,7 @@ def rip_video_disc(
         title_count=track_count,
         disc_id=disc_id,
         label=dir_label,
+        mb_metadata=mb_metadata,
     )
 
 

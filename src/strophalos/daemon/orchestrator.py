@@ -254,6 +254,7 @@ class Orchestrator:
         """Chown output to PUID:PGID, then write completed manifest."""
         out_dir = Path(result.output_dir)
         self._chown_output(out_dir)
+        mb = result.mb_metadata or {}
         manifest = RipManifest(
             status="done",
             label=result.label,
@@ -263,6 +264,13 @@ class Orchestrator:
             title_count=result.title_count,
             completed_at=datetime.now().isoformat(),
             disc_id=result.disc_id,
+            musicbrainz_release_id=mb.get("id"),
+            musicbrainz_artist=mb.get("artist"),
+            musicbrainz_title=mb.get("title"),
+            mb_track_count=mb.get("track_count"),
+            matched_tracks=mb.get("track_count"),  # filled by gap-fill step
+            match_strategy=mb.get("match_method"),
+            notes="MKV files contain video + lossless PCM audio. Convert to FLAC with: ffmpeg -i track.mkv -vn -c:a flac output.flac" if result.disc_type == "music" else None,
         )
         write_manifest(out_dir, manifest)
 

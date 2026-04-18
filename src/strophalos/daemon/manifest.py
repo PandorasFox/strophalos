@@ -35,6 +35,14 @@ class RipManifest:
     completed_at: str | None = None
     disc_id: str | None = None
     error: str | None = None
+    # Music BD metadata (populated by rip_video when disc_type == "music")
+    musicbrainz_release_id: str | None = None
+    musicbrainz_artist: str | None = None
+    musicbrainz_title: str | None = None
+    mb_track_count: int | None = None
+    matched_tracks: int | None = None
+    match_strategy: str | None = None  # "play-all" | "rip-all-dedup-window"
+    notes: str | None = None
 
 
 def write_manifest(output_dir: Path, manifest: RipManifest) -> Path:
@@ -62,6 +70,13 @@ def read_manifest(output_dir: Path) -> RipManifest | None:
             title_count=data.get("title_count"),
             completed_at=data.get("completed_at"),
             disc_id=data.get("disc_id"),
+            musicbrainz_release_id=data.get("musicbrainz_release_id"),
+            musicbrainz_artist=data.get("musicbrainz_artist"),
+            musicbrainz_title=data.get("musicbrainz_title"),
+            mb_track_count=data.get("mb_track_count"),
+            matched_tracks=data.get("matched_tracks"),
+            match_strategy=data.get("match_strategy"),
+            notes=data.get("notes"),
             error=data.get("error"),
         )
     except (json.JSONDecodeError, KeyError):
