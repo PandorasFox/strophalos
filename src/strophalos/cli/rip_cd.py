@@ -48,6 +48,7 @@ def _query_disc_info(device: str) -> dict:
 
         disc = discid.read(device)
         info["disc_id"] = disc.id
+        info["submission_url"] = disc.submission_url
 
         result = musicbrainzngs.get_releases_by_discid(disc.id, includes=["artists", "recordings", "release-groups"])
 
@@ -186,12 +187,18 @@ def rip_audio_cd(device: str, output: str = "/output-cd") -> int:
 
         notify("CD ripped", "\n".join(lines))
     elif rc != 0:
-        disc_id = info.get("disc_id", "")
         stderr = result.stderr or ""
 
         if "unable to retrieve disc metadata" in stderr:
-            # Disc TOC not in MusicBrainz — build the attach URL
-            attach_url = f"https://musicbrainz.org/cdtoc/attach?id={disc_id}" if disc_id else ""
+            # Use the submission URL from discid (has full TOC params),
+            # rewritten to point at upstream musicbrainz.org
+            submission_url = info.get("submission_url", "")
+            if submission_url:
+                import re as _re
+
+                attach_url = _re.sub(r"https?://[^/]+", "https://musicbrainz.org", submission_url)
+            else:
+                attach_url = ""
             if attach_url:
                 msg = f"Disc TOC not found in MusicBrainz.\n\nAdd this disc:\n{attach_url}"
             else:
