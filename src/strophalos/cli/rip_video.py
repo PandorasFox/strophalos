@@ -48,11 +48,22 @@ def _rip_music_bd(
 
     if has_play_all:
         return _rip_play_all_strategy(
-            drive, out_dir, durations, chapters, to_rip, mb_tracks, mb_track_count,
+            drive,
+            out_dir,
+            durations,
+            chapters,
+            to_rip,
+            mb_tracks,
+            mb_track_count,
         )
     else:
         return _rip_all_dedup_strategy(
-            drive, out_dir, durations, chapters, mb_tracks, mb_track_count,
+            drive,
+            out_dir,
+            durations,
+            chapters,
+            mb_tracks,
+            mb_track_count,
         )
 
 
@@ -70,8 +81,10 @@ def _rip_play_all_strategy(
 
     play_all_tid = to_rip[0]
 
-    print(f"\n  Music BD [play-all]: ripping title {play_all_tid} "
-          f"({chapters.get(play_all_tid, '?')} chapters, MB expects {mb_track_count} tracks)")
+    print(
+        f"\n  Music BD [play-all]: ripping title {play_all_tid} "
+        f"({chapters.get(play_all_tid, '?')} chapters, MB expects {mb_track_count} tracks)"
+    )
 
     rip_titles(drive, [play_all_tid], out_dir)
 
@@ -120,8 +133,10 @@ def _rip_play_all_strategy(
         print(f"  Music BD: {len(remaining_tids)} non-subset title(s) to check: {remaining_tids}")
         _rip_remaining_titles(drive, out_dir, remaining_tids, len(split_durs))
     elif len(split_durs) < mb_track_count:
-        print(f"  Music BD: play-all has {len(split_durs)} chapters but MB expects "
-              f"{mb_track_count} — no remaining titles to hunt")
+        print(
+            f"  Music BD: play-all has {len(split_durs)} chapters but MB expects "
+            f"{mb_track_count} — no remaining titles to hunt"
+        )
 
     # Clean up
     play_all_mkv.unlink(missing_ok=True)
@@ -153,10 +168,7 @@ def _slide_window_match(
     best_avg = float("inf")
 
     for pos in range(n_mb - n_ch + 1):
-        total_diff = sum(
-            abs(chapter_durs[i] - mb_durs[pos + i])
-            for i in range(n_ch)
-        )
+        total_diff = sum(abs(chapter_durs[i] - mb_durs[pos + i]) for i in range(n_ch))
         avg = total_diff / n_ch
         if avg < best_avg:
             best_avg = avg
@@ -238,12 +250,16 @@ def _rip_all_dedup_strategy(
 
         if avg_diff > 30:
             # No good fit — might be bonus content not in MB listing
-            print(f"  Music BD: title {tid} ({len(ch_files)} ch) — no good window match "
-                  f"(best avg diff {avg_diff:.0f}s at pos {pos})")
+            print(
+                f"  Music BD: title {tid} ({len(ch_files)} ch) — no good window match "
+                f"(best avg diff {avg_diff:.0f}s at pos {pos})"
+            )
             continue
 
-        print(f"  Music BD: title {tid} ({len(ch_files)} ch) → MB tracks {pos}-{pos + len(ch_files) - 1} "
-              f"(avg diff {avg_diff:.1f}s)")
+        print(
+            f"  Music BD: title {tid} ({len(ch_files)} ch) → MB tracks {pos}-{pos + len(ch_files) - 1} "
+            f"(avg diff {avg_diff:.1f}s)"
+        )
 
         for i, (f, dur) in enumerate(ch_files):
             mb_pos = pos + i

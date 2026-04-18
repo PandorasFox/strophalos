@@ -273,7 +273,8 @@ class Orchestrator:
             notes=(
                 "MKV files contain video + lossless PCM audio. "
                 "Convert to FLAC with: ffmpeg -i track.mkv -vn -c:a flac output.flac"
-                if result.disc_type == "music" else None
+                if result.disc_type == "music"
+                else None
             ),
         )
         write_manifest(out_dir, manifest)

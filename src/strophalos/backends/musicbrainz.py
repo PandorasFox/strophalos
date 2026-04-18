@@ -88,12 +88,14 @@ def _get_release_tracks(rel: dict[str, Any], release_id: str) -> list[dict[str, 
             if length_ms:
                 has_lengths = True
             rec = track.get("recording", {})
-            tracks.append({
-                "position": track.get("position", track.get("number", "?")),
-                "title": rec.get("title", track.get("title", "?")),
-                "recording_id": rec.get("id", ""),
-                "duration": int(length_ms) / 1000.0 if length_ms else 0.0,
-            })
+            tracks.append(
+                {
+                    "position": track.get("position", track.get("number", "?")),
+                    "title": rec.get("title", track.get("title", "?")),
+                    "recording_id": rec.get("id", ""),
+                    "duration": int(length_ms) / 1000.0 if length_ms else 0.0,
+                }
+            )
 
     if tracks and has_lengths:
         return tracks
@@ -108,12 +110,14 @@ def _get_release_tracks(rel: dict[str, Any], release_id: str) -> list[dict[str, 
         for track in medium.get("tracks", []):
             rec = track.get("recording", {})
             length_ms = rec.get("length") or track.get("length")
-            tracks.append({
-                "position": track.get("position", track.get("number", "?")),
-                "title": rec.get("title", track.get("title", "?")),
-                "recording_id": rec.get("id", ""),
-                "duration": int(length_ms) / 1000.0 if length_ms else 0.0,
-            })
+            tracks.append(
+                {
+                    "position": track.get("position", track.get("number", "?")),
+                    "title": rec.get("title", track.get("title", "?")),
+                    "recording_id": rec.get("id", ""),
+                    "duration": int(length_ms) / 1000.0 if length_ms else 0.0,
+                }
+            )
 
     return tracks
 
@@ -187,8 +191,10 @@ def search_release(label: str, durations: list[float], prefer_bluray: bool = Fal
         if mb_total > 0 and file_total > 0:
             diff_pct = abs(mb_total - file_total) / mb_total
             if diff_pct < 0.02:
-                print(f"  MusicBrainz: {artist} - {rel_title} "
-                      f"({len(tracks)} tracks, total duration match {diff_pct:.1%} off)")
+                print(
+                    f"  MusicBrainz: {artist} - {rel_title} "
+                    f"({len(tracks)} tracks, total duration match {diff_pct:.1%} off)"
+                )
                 return {
                     "id": rel_id,
                     "title": rel_title,
@@ -288,10 +294,7 @@ def score_musicbrainz(disc_label: str | None, durations: dict[int, int]) -> tupl
     # If we found a Blu-ray release with a matching title, that's a strong
     # signal even if durations don't align (common with multi-section discs
     # that have no play-all and heavy duplication across titles).
-    is_bd = any(
-        "blu-ray" in (m.get("format") or "").lower()
-        for m in best.get("media", [])
-    )
+    is_bd = any("blu-ray" in (m.get("format") or "").lower() for m in best.get("media", []))
     if is_bd:
         score = 0.75
         release_info = {
