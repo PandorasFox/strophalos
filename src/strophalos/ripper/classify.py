@@ -154,7 +154,7 @@ def classify_disc(
         if mb_release and "track_count" in mb_release:
             mb_track_count = mb_release["track_count"]
             best_diff = abs(chapters.get(longest_tid, 0) - mb_track_count)
-            for tid, dur in sorted_titles:
+            for tid, _dur in sorted_titles:
                 ch = chapters.get(tid, 0)
                 diff = abs(ch - mb_track_count)
                 if diff < best_diff:

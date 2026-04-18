@@ -37,8 +37,6 @@ def _rip_music_bd(
 
     Returns the number of track files produced.
     """
-    from strophalos.core.mkv import get_mkv_duration, split_by_chapters
-
     mb_tracks = mb_metadata.get("tracks", [])
     mb_track_count = mb_metadata.get("track_count", len(mb_tracks))
     match_method = mb_metadata.get("match_method", "")
@@ -441,7 +439,7 @@ def rip_video_disc(
     # Music BD: special chapter-split rip flow
     if disc_type == "music" and mb_metadata:
         # Fetch full track detail from MB by release ID
-        from strophalos.backends.musicbrainz import _fetch_release_detail, _get_artist, _get_release_tracks
+        from strophalos.backends.musicbrainz import _get_release_tracks
 
         mb_tracks = mb_metadata.get("tracks")
         if not mb_tracks and mb_metadata.get("id"):

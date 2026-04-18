@@ -270,7 +270,11 @@ class Orchestrator:
             mb_track_count=mb.get("track_count"),
             matched_tracks=mb.get("track_count"),  # filled by gap-fill step
             match_strategy=mb.get("match_method"),
-            notes="MKV files contain video + lossless PCM audio. Convert to FLAC with: ffmpeg -i track.mkv -vn -c:a flac output.flac" if result.disc_type == "music" else None,
+            notes=(
+                "MKV files contain video + lossless PCM audio. "
+                "Convert to FLAC with: ffmpeg -i track.mkv -vn -c:a flac output.flac"
+                if result.disc_type == "music" else None
+            ),
         )
         write_manifest(out_dir, manifest)
 

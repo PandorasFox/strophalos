@@ -170,7 +170,7 @@ def search_release(label: str, durations: list[float], prefer_bluray: bool = Fal
         # For exact count match, compare per-track durations
         if len(tracks) == n_tracks:
             track_durs = sorted(t["duration"] for t in tracks)
-            total_diff = sum(abs(a - b) for a, b in zip(sorted_durs, track_durs))
+            total_diff = sum(abs(a - b) for a, b in zip(sorted_durs, track_durs, strict=True))
             avg_diff = total_diff / n_tracks
             if avg_diff < 5.0:
                 print(f"  MusicBrainz: {artist} - {rel_title} ({len(tracks)} tracks, avg diff {avg_diff:.1f}s)")
