@@ -27,6 +27,41 @@ def _mb_get(path: str) -> dict[str, Any] | None:
     return get_json(url, headers={"User-Agent": MB_USER_AGENT}, timeout=10)
 
 
+# Cache for English alias lookups
+_alias_cache: dict[str, str | None] = {}
+
+
+def get_english_name(entity_type: str, entity_id: str, fallback: str) -> str:
+    """Get the English alias for a MusicBrainz entity, or return fallback.
+
+    Queries /ws/2/{entity_type}/{id}?inc=aliases and looks for an English
+    locale alias, preferring primary aliases. Caches results.
+    """
+    cache_key = f"{entity_type}:{entity_id}"
+    if cache_key in _alias_cache:
+        return _alias_cache[cache_key] or fallback
+
+    data = _mb_get(f"/{entity_type}/{entity_id}?inc=aliases&fmt=json")
+    if not data:
+        _alias_cache[cache_key] = None
+        return fallback
+
+    aliases = data.get("aliases", [])
+    en_primary = None
+    en_any = None
+    for alias in aliases:
+        locale = alias.get("locale", "")
+        if locale in ("en", "eng"):
+            if alias.get("primary"):
+                en_primary = alias.get("name")
+            elif en_any is None:
+                en_any = alias.get("name")
+
+    result = en_primary or en_any
+    _alias_cache[cache_key] = result
+    return result or fallback
+
+
 def _search_releases(query: str, limit: int = 10) -> list[dict[str, Any]]:
     """Search MB for releases by query string. Returns raw release list."""
     url = f"{_mb_base()}/ws/2/release/?query={urllib.parse.quote(query)}&fmt=json&limit={limit}"

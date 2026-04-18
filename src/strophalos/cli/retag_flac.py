@@ -15,53 +15,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from strophalos.core.http import get_json
-
-
-def _mb_base() -> str:
-    server = os.environ.get("MB_SERVER", "")
-    if not server:
-        return "https://musicbrainz.org"
-    if server.startswith("http://") or server.startswith("https://"):
-        return server.rstrip("/")
-    return f"https://{server}"
-
-
-def _mb_get(path: str) -> dict | None:
-    url = f"{_mb_base()}/ws/2{path}"
-    return get_json(url, headers={"User-Agent": "strophalos/1.0"}, timeout=10)
-
-
-# Cache lookups to avoid re-querying for the same entity across tracks
-_cache: dict[str, str | None] = {}
-
-
-def _get_english_name(entity_type: str, entity_id: str, fallback: str) -> str:
-    """Get the English alias for a MusicBrainz entity, or return fallback."""
-    cache_key = f"{entity_type}:{entity_id}"
-    if cache_key in _cache:
-        return _cache[cache_key] or fallback
-
-    data = _mb_get(f"/{entity_type}/{entity_id}?inc=aliases&fmt=json")
-    if not data:
-        _cache[cache_key] = None
-        return fallback
-
-    # Look for an English alias (prefer primary)
-    aliases = data.get("aliases", [])
-    en_primary = None
-    en_any = None
-    for alias in aliases:
-        locale = alias.get("locale", "")
-        if locale in ("en", "eng"):
-            if alias.get("primary"):
-                en_primary = alias.get("name")
-            elif en_any is None:
-                en_any = alias.get("name")
-
-    result = en_primary or en_any
-    _cache[cache_key] = result
-    return result or fallback
+from strophalos.backends.musicbrainz import get_english_name as _get_english_name
 
 
 def _get_recording_title(recording_id: str, fallback: str) -> str:
