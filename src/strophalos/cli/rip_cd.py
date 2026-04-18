@@ -27,24 +27,12 @@ def _query_disc_info(device: str) -> dict:
         import discid
         import musicbrainzngs
 
-        # Configure musicbrainzngs
+        # Configure musicbrainzngs — always use upstream musicbrainz.org for
+        # disc lookups. Mirrors lag behind and won't have freshly-submitted
+        # releases/TOC attachments. The mirror (MB_SERVER) is used elsewhere
+        # for non-time-sensitive queries like BD-OST classification.
         musicbrainzngs.set_useragent("rip-cd", "1.0", "local")
-
-        # Use MB_SERVER env var, fall back to whipper config, then default
-        mb_server = os.environ.get("MB_SERVER", "")
-        if mb_server:
-            mb_server = mb_server.replace("http://", "").replace("https://", "")
-            musicbrainzngs.set_hostname(mb_server)
-        else:
-            try:
-                from whipper.common.config import Config
-
-                conf = Config()
-                server = conf._parser.get("musicbrainz", "server")
-                server = server.replace("http://", "").replace("https://", "")
-                musicbrainzngs.set_hostname(server)
-            except Exception:
-                pass
+        musicbrainzngs.set_hostname("musicbrainz.org")
 
         disc = discid.read(device)
         info["disc_id"] = disc.id
