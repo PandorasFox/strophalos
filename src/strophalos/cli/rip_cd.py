@@ -135,7 +135,7 @@ def rip_audio_cd(device: str, output: str = "/output-cd") -> int:
     else:
         notify("Ripping CD", "(unknown disc)")
 
-    # Run whipper
+    # Run whipper (capture stderr for failure diagnostics)
     cmd = [
         "whipper",
         "cd",
@@ -149,12 +149,27 @@ def rip_audio_cd(device: str, output: str = "/output-cd") -> int:
         "--disc-template",
         disc_tpl,
     ]
-    result = subprocess.run(cmd)
+    result = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
     rc = result.returncode
+
+    # Print stderr for logging (whipper progress goes to stdout)
+    if result.stderr:
+        for line in result.stderr.strip().splitlines():
+            print(f"  whipper: {line}", flush=True)
 
     # Post-rip: flatten multi-disc directories
     if disc_total > 1:
         _flatten_multi_disc_dirs(Path(output))
+
+    # Post-rip: re-tag with English locale names from MusicBrainz
+    if rc == 0:
+        try:
+            from strophalos.cli.retag_flac import retag_directory
+
+            print("Re-tagging with English locale names...")
+            retag_directory(Path(output))
+        except Exception as e:
+            print(f"  retag failed (non-fatal): {e}")
 
     # Notification
     if rc == 0 and title:
@@ -171,7 +186,16 @@ def rip_audio_cd(device: str, output: str = "/output-cd") -> int:
 
         notify("CD ripped", "\n".join(lines))
     elif rc != 0:
-        notify("CD rip failed", f"{artist or 'Unknown'} - {title or 'Unknown'} (exit {rc})", error=True)
+        disc_id = info.get("disc_id", "")
+        stderr = result.stderr or ""
+
+        if "unable to retrieve disc metadata" in stderr:
+            # Disc TOC not in MusicBrainz — build the attach URL
+            attach_url = f"https://musicbrainz.org/cdtoc/attach?id={disc_id}" if disc_id else ""
+            msg = f"Disc TOC not found in MusicBrainz.\n\nAdd this disc:\n{attach_url}" if attach_url else "Disc TOC not found in MusicBrainz."
+            notify("CD rip skipped — TOC not mapped", msg, error=True)
+        else:
+            notify("CD rip failed", f"{artist or 'Unknown'} - {title or 'Unknown'} (exit {rc})", error=True)
 
     return rc
 
