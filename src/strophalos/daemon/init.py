@@ -62,21 +62,14 @@ def initialize(puid: int, pgid: int) -> None:
         except OSError:
             pass
 
-    # 5. Seed whipper config + patch MB_SERVER if set
+    # 5. Seed whipper config (whipper uses musicbrainz.org for lookup URLs —
+    # don't patch it to our mirror, or the "add this disc" URLs will point
+    # at the mirror which rejects writes. Our rip_cd.py uses MB_SERVER
+    # independently for API queries.)
     whipper_conf = Path("/config/.config/whipper/whipper.conf")
     default_conf = Path("/defaults/whipper.conf")
     if not whipper_conf.exists() and default_conf.exists():
         shutil.copy2(default_conf, whipper_conf)
-
-    mb_server = os.environ.get("MB_SERVER", "")
-    if mb_server and whipper_conf.exists():
-        text = whipper_conf.read_text()
-        # Ensure scheme is present
-        if not mb_server.startswith("http"):
-            mb_server = f"https://{mb_server}"
-        import re
-        text = re.sub(r"(?m)^server\s*=.*$", f"server = {mb_server}", text)
-        whipper_conf.write_text(text)
 
     # 6. Seed hooks
     hooks_dir = Path("/defaults/hooks")
