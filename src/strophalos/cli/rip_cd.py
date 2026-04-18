@@ -146,6 +146,18 @@ def rip_audio_cd(device: str, output: str = "/output-cd") -> int:
         for line in result.stderr.strip().splitlines():
             print(f"  whipper: {line}", flush=True)
 
+    # Retry with --unknown if whipper couldn't retrieve metadata
+    # (can happen even when the release exists — whipper parsing bugs)
+    if rc != 0 and result.stderr and "unable to retrieve disc metadata" in result.stderr:
+        print("  Retrying with --unknown...", flush=True)
+        cmd_retry = cmd.copy()
+        cmd_retry.insert(cmd_retry.index("rip") + 1, "--unknown")
+        result = subprocess.run(cmd_retry, stderr=subprocess.PIPE, text=True)
+        rc = result.returncode
+        if result.stderr:
+            for line in result.stderr.strip().splitlines():
+                print(f"  whipper: {line}", flush=True)
+
     # Post-rip: flatten multi-disc directories
     if disc_total > 1:
         _flatten_multi_disc_dirs(Path(output))
