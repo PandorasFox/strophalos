@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="$HOME/.local/bin:$PATH"
+
+if ! command -v ruff >/dev/null 2>&1; then
+    echo "pre-commit: ruff not found on PATH (or in ~/.local/bin)" >&2
+    echo "            install with: pip install --user ruff" >&2
+    exit 1
+fi
+
+ruff check src/
+ruff format --check src/
