@@ -246,12 +246,20 @@ def search_release(label: str, durations: list[float], prefer_bluray: bool = Fal
 # ---------------------------------------------------------------------------
 
 
-def score_musicbrainz(disc_label: str | None, durations: dict[int, int]) -> tuple[float, dict[str, Any] | None]:
+def score_musicbrainz(
+    disc_label: str | None,
+    durations: dict[int, int],
+    allow_title_only_match: bool = True,
+) -> tuple[float, dict[str, Any] | None]:
     """Check MusicBrainz for a matching audio BD release. Returns (score, release_info).
 
     Searches by disc label, filters to Blu-ray releases, prefers English.
     Matches by total duration (since makemkv groups BD tracks into titles by
     playlist structure, so track counts won't match).
+
+    If allow_title_only_match is False, Strategy 3 (Blu-ray title match with
+    no duration confirmation) is disabled — use this when a stronger signal
+    (e.g. a TMDb movie runtime match) already suggests the disc isn't audio.
     """
     if not disc_label:
         return 0.0, None
@@ -330,7 +338,7 @@ def score_musicbrainz(disc_label: str | None, durations: dict[int, int]) -> tupl
     # signal even if durations don't align (common with multi-section discs
     # that have no play-all and heavy duplication across titles).
     is_bd = any("blu-ray" in (m.get("format") or "").lower() for m in best.get("media", []))
-    if is_bd:
+    if is_bd and allow_title_only_match:
         score = 0.75
         release_info = {
             "artist": artist,

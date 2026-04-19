@@ -145,8 +145,16 @@ def classify_disc(
 
     meaningful = [(tid, dur) for tid, dur in sorted_titles if dur >= 120]
 
-    # Check MusicBrainz first — audio BDs have many short tracks
-    mb_score, mb_release = score_musicbrainz(disc_label, durations)
+    # TMDb first — a runtime match (disc title within 5% of a TMDb movie's
+    # runtime) is a strong "real movie" signal, strong enough to suppress the
+    # MB title-only match path that otherwise false-positives on films whose
+    # soundtracks exist as Blu-ray releases (e.g. Princess Mononoke).
+    m_boost, t_boost = score_title_search(disc_label, durations)
+    tmdb_runtime_match = m_boost >= 0.6
+
+    # MusicBrainz: audio BDs have many short tracks. Suppress Strategy 3
+    # (title-only match) if TMDb already runtime-matched a movie.
+    mb_score, mb_release = score_musicbrainz(disc_label, durations, allow_title_only_match=not tmdb_runtime_match)
     if mb_score > 0.7:
         # Identify the play-all title: longest title with chapter count
         # closest to MB track count
@@ -180,8 +188,7 @@ def classify_disc(
     m_score, m_titles, m_reason = _score_movie(sorted_titles, longest_tid, longest_dur, rest, meaningful)
     t_score, t_titles, t_reason = _score_tv(sorted_titles, longest_tid, longest_dur, rest, meaningful)
 
-    # Optional title search boost (with runtime matching)
-    m_boost, t_boost = score_title_search(disc_label, durations)
+    # TMDb boosts were computed up front; apply them now
     m_score += m_boost
     t_score += t_boost
 
