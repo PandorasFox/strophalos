@@ -12,18 +12,25 @@ from strophalos.ripper.classify import classify_disc
 # ---------------------------------------------------------------------------
 
 FFXIV_DURATIONS = {
-    0: 2030,   # 9 chapters — section (subset)
-    1: 2645,   # 9 chapters — section (subset)
-    2: 3536,   # 14 chapters — section (subset)
-    3: 5818,   # 21 chapters — section (subset)
-    4: 2018,   # 9 chapters — section (subset)
-    5: 1520,   # 6 chapters — section (subset)
+    0: 2030,  # 9 chapters — section (subset)
+    1: 2645,  # 9 chapters — section (subset)
+    2: 3536,  # 14 chapters — section (subset)
+    3: 5818,  # 21 chapters — section (subset)
+    4: 2018,  # 9 chapters — section (subset)
+    5: 1520,  # 6 chapters — section (subset)
     6: 12894,  # 50 chapters — play-all
-    7: 262,    # 0 chapters — bonus tracks
+    7: 262,  # 0 chapters — bonus tracks
 }
 
 FFXIV_CHAPTERS = {
-    0: 9, 1: 9, 2: 14, 3: 21, 4: 9, 5: 6, 6: 50, 7: 0,
+    0: 9,
+    1: 9,
+    2: 14,
+    3: 21,
+    4: 9,
+    5: 6,
+    6: 50,
+    7: 0,
 }
 
 FFXIV_MB_RELEASE = {
@@ -44,7 +51,8 @@ class TestMusicBDClassification:
     def test_ffxiv_classified_as_music(self, mock_tmdb, mock_mb):
         mock_mb.return_value = (0.91, FFXIV_MB_RELEASE)
         disc_type, titles, reason, meta = classify_disc(
-            FFXIV_DURATIONS, FFXIV_CHAPTERS,
+            FFXIV_DURATIONS,
+            FFXIV_CHAPTERS,
             "THE FAR EDGE OF FATE： FINAL FANTASY XIV Original Soundtrack",
         )
         assert disc_type == "music"
@@ -57,7 +65,8 @@ class TestMusicBDClassification:
         """The play-all title (most chapters, closest to MB track count) should be selected."""
         mock_mb.return_value = (0.91, FFXIV_MB_RELEASE)
         _disc_type, titles, _reason, _meta = classify_disc(
-            FFXIV_DURATIONS, FFXIV_CHAPTERS,
+            FFXIV_DURATIONS,
+            FFXIV_CHAPTERS,
             "THE FAR EDGE OF FATE： FINAL FANTASY XIV Original Soundtrack",
         )
         # Title 6 has 50 chapters, closest to 52 MB tracks
@@ -69,7 +78,8 @@ class TestMusicBDClassification:
         """Without a strong MB match, this disc should NOT classify as music."""
         mock_mb.return_value = (0.0, None)
         disc_type, _titles, _reason, _meta = classify_disc(
-            FFXIV_DURATIONS, FFXIV_CHAPTERS,
+            FFXIV_DURATIONS,
+            FFXIV_CHAPTERS,
             "THE FAR EDGE OF FATE： FINAL FANTASY XIV Original Soundtrack",
         )
         assert disc_type != "music"
