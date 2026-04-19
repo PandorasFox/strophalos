@@ -471,6 +471,32 @@ def rip_video_disc(
         rip_titles(drive, to_rip, out_dir)
         track_count = len(to_rip)
 
+    # Validate ripped files — MakeMKV can exit 0 but write corrupt output
+    # (header reads "This file was not properly finalized").  The stream
+    # data is usually intact; only the first ~48 bytes (reserved header
+    # space) get overwritten.  Try to remux with ffmpeg before giving up.
+    from strophalos.core.mkv import is_valid_mkv, repair_mkv
+
+    ripped_files = sorted(Path(out_dir).glob("*.mkv"))
+    corrupt = [f for f in ripped_files if not is_valid_mkv(f)]
+    if corrupt:
+        still_bad: list[Path] = []
+        for f in corrupt:
+            print(f"  CORRUPT: {f.name} (missing EBML header)")
+            if repair_mkv(f):
+                print(f"  REPAIRED: {f.name}")
+            else:
+                print(f"  UNRECOVERABLE: {f.name} — removing")
+                f.unlink()
+                still_bad.append(f)
+        valid_count = len(ripped_files) - len(still_bad)
+        if valid_count == 0:
+            print(f"  All {len(corrupt)} ripped file(s) are corrupt and unrecoverable — rip failed")
+            return None
+        if still_bad:
+            print(f"  {valid_count} of {len(ripped_files)} file(s) usable")
+        track_count = valid_count
+
     # Persist disc ID in output directory
     if disc_id:
         disc_meta = {
