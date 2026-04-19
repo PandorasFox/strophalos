@@ -5,9 +5,11 @@ from __future__ import annotations
 import os
 import re
 
+from strophalos.core.cache import _MISS, DiskCache
 from strophalos.core.http import build_url, get_json
 
 API_BASE = "https://kagi.com/api/v0"
+_cache = DiskCache("kagi")
 
 
 def search_disc_title(label: str, media_type: str = "movie") -> str | None:
@@ -27,12 +29,17 @@ def search_disc_title(label: str, media_type: str = "movie") -> str | None:
     media_hint = "blu-ray" if media_type == "movie" else "tv series blu-ray"
     search_query = f"{query} {media_hint}"
 
-    url = build_url(API_BASE, "/search", {"q": search_query, "limit": "5"})
-    data = get_json(url, headers={"Authorization": f"Bot {api_key}"})
-    if not data:
-        return None
-
-    results = data.get("data", [])
+    cached = _cache.get(search_query)
+    if cached is not _MISS:
+        print(f"  Kagi: cache hit for '{search_query}'")
+        results = cached or []
+    else:
+        url = build_url(API_BASE, "/search", {"q": search_query, "limit": "5"})
+        data = get_json(url, headers={"Authorization": f"Bot {api_key}"})
+        if not data:
+            return None
+        results = data.get("data", [])
+        _cache.put(search_query, results)
 
     # Only look at actual search results (t=0), skip related searches (t=1)
     search_results = [r for r in results if r.get("t") == 0]
