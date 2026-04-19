@@ -59,6 +59,7 @@ RUN ldconfig
 # whipper patches + strophalos package source
 COPY patches/ambiguous-release.patch /tmp/ambiguous-release.patch
 COPY patches/track-metadata-mismatch.patch /tmp/track-metadata-mismatch.patch
+COPY patches/mixed-mode-discid.patch /tmp/mixed-mode-discid.patch
 COPY pyproject.toml /tmp/strophalos/pyproject.toml
 COPY src/ /tmp/strophalos/src/
 
@@ -103,10 +104,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && cd /tmp/whipper \
     && patch -p1 < /tmp/ambiguous-release.patch \
     && patch -p1 < /tmp/track-metadata-mismatch.patch \
+    && patch -p1 < /tmp/mixed-mode-discid.patch \
     && pip3 install --break-system-packages --no-deps . \
     && cd / \
     && pip3 install --break-system-packages /tmp/strophalos \
-    && rm -rf /tmp/whipper /tmp/ambiguous-release.patch /tmp/track-metadata-mismatch.patch /tmp/strophalos \
+    && rm -rf /tmp/whipper /tmp/ambiguous-release.patch /tmp/track-metadata-mismatch.patch /tmp/mixed-mode-discid.patch /tmp/strophalos \
     && ln -s /usr/bin/cdparanoia /usr/bin/cd-paranoia \
     && apt-get purge -y python3-dev python3-pip gcc git patch libsndfile1-dev \
     && apt-get autoremove --purge -y \

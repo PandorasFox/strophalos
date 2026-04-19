@@ -1,0 +1,22 @@
+--- a/whipper/image/table.py	2026-04-18 19:16:01.000000000 -0700
++++ b/whipper/image/table.py	2026-04-18 19:29:22.618695263 -0700
+@@ -432,6 +432,19 @@
+         # number of first track
+         result.append(1)
+ 
++        # Mixed-mode (data track at position 1): MB's canonical CDTOC for
++        # these releases includes the data track, so compute the TOC over
++        # all tracks to match attached disc IDs.
++        if len(self.tracks) > 1 and not self.tracks[0].audio:
++            lastTrack = len(self.tracks)
++            result.append(lastTrack)
++            sectors = self.getTrackEnd(lastTrack) + 1 + 150
++            result.append(sectors)
++            for track in self.tracks:
++                result.append(track.getIndex(1).absolute + 150)
++            logger.debug('MusicBrainz values (mixed-mode): %r', result)
++            return result
++
+         # number of last audio track (default: number of audio tracks)
+         lastTrack = self.getAudioTracks()
+         result.append(lastTrack)
