@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import os
+import selectors
 import signal
 import subprocess
 import time
 
-# How long makemkvcon can go without producing any output before we kill it
-STALL_TIMEOUT = 1800  # 30 minutes
+# How long makemkvcon can go without producing any output before we kill it.
+# makemkvcon appears to block-buffer stdout on non-TTY during the `mkv` command,
+# so in practice this fires after N seconds of total rip time, not actual
+# silence. Kept generous as a safety net for truly wedged processes.
+STALL_TIMEOUT = 10800  # 3 hours
 
 
 def rip_titles(
@@ -29,18 +33,21 @@ def rip_titles(
     for i, tid in enumerate(title_ids):
         print(f"  Ripping title {tid} ({i + 1}/{len(title_ids)})...", flush=True)
         cmd = ["makemkvcon"] + opts + ["mkv", f"disc:{drive_id}", str(tid), output_dir]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
 
         last_activity = time.monotonic()
         last_progress_time = last_activity
         last_pct = -1
         output_tail: list[str] = []
         timed_out = False
+        read_buf = b""
 
         assert proc.stdout is not None
-        # Set stdout to non-blocking so we can check stall timeout
-        import selectors
-
         sel = selectors.DefaultSelector()
         sel.register(proc.stdout, selectors.EVENT_READ)
 
@@ -48,30 +55,45 @@ def rip_titles(
             while proc.poll() is None:
                 events = sel.select(timeout=10)
                 if events:
-                    line = proc.stdout.readline()
-                    if not line:
+                    chunk = proc.stdout.read1(4096)
+                    if not chunk:
                         break
-                    line = line.strip()
+                    # Reset stall on any wire activity, even partial lines (e.g.
+                    # progress that arrives as \r-updated output).
                     last_activity = time.monotonic()
-                    output_tail.append(line)
-                    if len(output_tail) > 20:
-                        output_tail.pop(0)
+                    read_buf += chunk
 
-                    if line.startswith("PRGV:"):
-                        parts = line[5:].split(",")
-                        if len(parts) >= 3:
-                            try:
-                                current, _total, pmax = int(parts[0]), int(parts[1]), int(parts[2])
-                                pct = int(current * 100 / pmax) if pmax > 0 else 0
-                                now = time.monotonic()
-                                if pct != last_pct and (now - last_progress_time) >= PROGRESS_INTERVAL:
-                                    print(f"  title {tid}: {pct}% ({i + 1}/{len(title_ids)})", flush=True)
-                                    last_progress_time = now
-                                    last_pct = pct
-                            except (ValueError, ZeroDivisionError):
-                                pass
+                    while True:
+                        idx = -1
+                        for sep in (b"\n", b"\r"):
+                            pos = read_buf.find(sep)
+                            if pos != -1 and (idx == -1 or pos < idx):
+                                idx = pos
+                        if idx == -1:
+                            break
+                        raw = read_buf[:idx]
+                        read_buf = read_buf[idx + 1 :]
+                        line = raw.decode("utf-8", errors="replace").strip()
+                        if not line:
+                            continue
+                        output_tail.append(line)
+                        if len(output_tail) > 20:
+                            output_tail.pop(0)
+
+                        if line.startswith("PRGV:"):
+                            parts = line[5:].split(",")
+                            if len(parts) >= 3:
+                                try:
+                                    current, _total, pmax = int(parts[0]), int(parts[1]), int(parts[2])
+                                    pct = int(current * 100 / pmax) if pmax > 0 else 0
+                                    now = time.monotonic()
+                                    if pct != last_pct and (now - last_progress_time) >= PROGRESS_INTERVAL:
+                                        print(f"  title {tid}: {pct}% ({i + 1}/{len(title_ids)})", flush=True)
+                                        last_progress_time = now
+                                        last_pct = pct
+                                except (ValueError, ZeroDivisionError):
+                                    pass
                 else:
-                    # No output — check stall
                     if time.monotonic() - last_activity > STALL_TIMEOUT:
                         print(f"  title {tid}: no output for {STALL_TIMEOUT}s, killing", flush=True)
                         timed_out = True
@@ -89,6 +111,7 @@ def rip_titles(
             for sl in output_tail[-5:]:
                 print(f"  > {sl}")
             if proc.stderr:
-                for sl in proc.stderr.read().strip().split("\n")[-5:]:
+                stderr_text = proc.stderr.read().decode("utf-8", errors="replace")
+                for sl in stderr_text.strip().split("\n")[-5:]:
                     if sl:
                         print(f"  > {sl}")
