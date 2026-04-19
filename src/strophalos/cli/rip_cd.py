@@ -183,7 +183,10 @@ def rip_audio_cd(device: str, output: str = "/output-cd") -> int:
     else:
         notify("Ripping CD", "(unknown disc)")
 
-    # Run whipper (--cdr allows CD-R discs without extra prompting)
+    # Run whipper (--cdr allows CD-R discs without extra prompting).
+    # -R pins the release: whipper's own MB query uses an audio-only disc ID
+    # which won't match mixed-mode submissions, so we hand it the release we
+    # already found via the full-TOC disc ID.
     cmd = [
         "whipper",
         "cd",
@@ -198,6 +201,8 @@ def rip_audio_cd(device: str, output: str = "/output-cd") -> int:
         "--disc-template",
         disc_tpl,
     ]
+    if release_id:
+        cmd += ["-R", release_id]
     result = subprocess.run(cmd)
     rc = result.returncode
 
