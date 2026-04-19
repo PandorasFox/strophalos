@@ -10,6 +10,7 @@ from pathlib import Path
 
 from strophalos.backends.tmdb import clean_movie_label, search_movie
 from strophalos.core.fs import sanitize_filename
+from strophalos.core.mkv import get_mkv_duration
 from strophalos.core.notify import notify
 
 
@@ -44,8 +45,12 @@ def main() -> None:
     if extras:
         print(f"  Extras: {len(extras)} file(s)")
 
-    # Search TMDb
-    movie = search_movie(args.label)
+    # Search TMDb — pass main feature duration so ambiguous labels can be
+    # disambiguated by runtime (e.g. 25-min OVA vs 101-min film).
+    duration = get_mkv_duration(main_feature)
+    if duration:
+        print(f"  Duration: {duration / 60:.0f}m")
+    movie = search_movie(args.label, duration_seconds=duration)
     if not movie:
         clean = clean_movie_label(args.label)
         msg = f"No TMDb match for '{clean}'. Add the movie at https://www.themoviedb.org and re-run."

@@ -113,8 +113,9 @@ def find_pending_rips(archive_root: Path) -> list[tuple[Path, RipManifest]]:
         manifest = read_manifest(manifest_path.parent)
         if manifest is None or manifest.status != "done":
             continue
-        # Skip data discs — no identification step
-        if manifest.disc_type == "data":
+        # Skip data and music discs — no identification step
+        # (audio CDs/BDs are fully handled by the rip stage)
+        if manifest.disc_type in ("data", "music"):
             continue
         rip_dir = manifest_path.parent
         has_id = any((rip_dir / f).exists() for f in IDENTIFY_MANIFESTS)

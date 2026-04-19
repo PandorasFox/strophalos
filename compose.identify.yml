@@ -1,0 +1,29 @@
+# strophalos identify+deploy — runs on the NAS/library machine
+# Polls archive for completed rips (via .rip-manifest.json) and runs
+# identification + hard-link deployment to the library.
+#
+# The rip stage runs on the desktop (separate compose with STROPHALOS_MODE=rip).
+# Both machines share /mnt/pool/library via NFS.
+#
+# Usage:
+#   docker compose -f compose.identify.yml up -d
+
+services:
+  strophalos-identify:
+    build: .
+    image: cerberus-strophalos:latest
+    container_name: strophalos-identify
+    restart: unless-stopped
+    environment:
+      - STROPHALOS_MODE=identify
+      - TMDB_API_KEY=b529472444b80d3c4af8f59de6cc87bc
+      - KAGI_API_KEY=  # optional, web search fallback for mangled disc labels
+      - OPENSUBTITLES_API_KEY=  # optional, enables hash-based episode identification
+      - ASSUME_DISC_ORDER=true
+      - NOTIFY_URL=  # apprise URL, e.g. tgram://bot_token/chat_id
+      - PUID=1000
+      - PGID=1000
+    volumes:
+      - ./data/identify:/config:rw
+      - /mnt/pool/library:/media:rw
+    # No devices needed — identify mode doesn't touch optical drives

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 
+from strophalos.backends.kagi import search_disc_title
 from strophalos.core.http import build_url, get_json
 from strophalos.types import Episode
 
@@ -36,8 +37,14 @@ def clean_movie_label(label: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def search_movie(label: str) -> dict | None:
-    """Search TMDb for a movie. Returns top result dict or None."""
+def search_movie(label: str, duration_seconds: float = 0) -> dict | None:
+    """Search TMDb for a movie. Returns best result dict or None.
+
+    When *duration_seconds* is provided, fetches runtimes for the top results
+    and prefers the candidate whose runtime is closest to the file duration.
+    This prevents short OVAs from outranking feature films when the disc label
+    is ambiguous (e.g. ``FINAL_FANTASY_VII``).
+    """
     query = clean_movie_label(label)
     if not query:
         return None
@@ -49,11 +56,51 @@ def search_movie(label: str) -> dict | None:
     results = data.get("results", [])
     if not results:
         print(f"  TMDb: no movie results for '{query}'")
-        return None
+        # Fallback: web search for the mangled label, then re-query TMDb
+        kagi_title = search_disc_title(label, media_type="movie")
+        if kagi_title and kagi_title.lower() != query.lower():
+            print(f"  TMDb: retrying with Kagi-resolved title '{kagi_title}'")
+            data = _tmdb_get("/search/movie", {"query": kagi_title})
+            if data:
+                results = data.get("results", [])
+        if not results:
+            return None
 
-    top = results[0]
-    print(f"  TMDb: matched '{query}' → {top.get('title')} ({top.get('release_date', '?')[:4]})")
-    return top
+    # Without a duration hint, just take the top result.
+    if not duration_seconds or len(results) == 1:
+        top = results[0]
+        print(f"  TMDb: matched '{query}' → {top.get('title')} ({top.get('release_date', '?')[:4]})")
+        return top
+
+    # Fetch runtimes for the top candidates and pick the closest match.
+    candidates = results[:5]
+    best = candidates[0]
+    best_diff = float("inf")
+
+    for r in candidates:
+        movie_id = r.get("id")
+        if not movie_id:
+            continue
+        detail = _tmdb_get(f"/movie/{movie_id}")
+        if not detail:
+            continue
+        runtime_min = detail.get("runtime") or 0
+        runtime_sec = runtime_min * 60
+        r["_runtime_sec"] = runtime_sec
+
+        if runtime_sec <= 0:
+            continue
+
+        diff = abs(duration_seconds - runtime_sec)
+        title_name = r.get("title", "?")
+        print(f"  TMDb: candidate '{title_name}' runtime={runtime_min}m (diff={diff / 60:.0f}m)")
+
+        if diff < best_diff:
+            best_diff = diff
+            best = r
+
+    print(f"  TMDb: matched '{query}' → {best.get('title')} ({best.get('release_date', '?')[:4]})")
+    return best
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +122,14 @@ def search_series(label: str) -> tuple[int, str] | None:
     results = data.get("results", [])
     if not results:
         print(f"  TMDb: no TV results for '{query}'")
-        return None
+        kagi_title = search_disc_title(label, media_type="tv")
+        if kagi_title and kagi_title.lower() != query.lower():
+            print(f"  TMDb: retrying with Kagi-resolved title '{kagi_title}'")
+            data = _tmdb_get("/search/tv", {"query": kagi_title})
+            if data:
+                results = data.get("results", [])
+        if not results:
+            return None
 
     top = results[0]
     series_id = top["id"]

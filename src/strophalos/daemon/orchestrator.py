@@ -307,6 +307,7 @@ class Orchestrator:
     def _run_identify_loop(self) -> None:
         """Identify mode: poll archive for unidentified completed rips."""
         _log(f"identify mode — watching {self.archive_root} for completed rips")
+        tick = 0
 
         while True:
             pending = find_pending_rips(self.archive_root)
@@ -319,6 +320,10 @@ class Orchestrator:
                     self._identify(manifest.disc_type, str(rip_dir), manifest.label)
                 except Exception as e:
                     _log(f"identification failed for {rip_dir}: {e}")
+
+            tick += 1
+            if not pending and tick % 10 == 0:
+                _log(f"heartbeat — waiting for rips (tick={tick})")
 
             time.sleep(60)
 
