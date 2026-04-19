@@ -1,0 +1,23 @@
+--- a/whipper/common/program.py	2026-04-18 13:22:08.000000000 -0700
++++ b/whipper/common/program.py	2026-04-18 17:44:14.284314181 -0700
+@@ -230,9 +230,17 @@
+                 v['R'] = metadata.releaseType
+                 v['r'] = metadata.releaseType.lower()
+             if track_number is not None and track_number > 0:
+-                v['a'] = metadata.tracks[track_number - 1].artist
+-                v['s'] = metadata.tracks[track_number - 1].sortName
+-                v['n'] = metadata.tracks[track_number - 1].title
++                if track_number <= len(metadata.tracks):
++                    v['a'] = metadata.tracks[track_number - 1].artist
++                    v['s'] = metadata.tracks[track_number - 1].sortName
++                    v['n'] = metadata.tracks[track_number - 1].title
++                else:
++                    logger.warning('track %d beyond metadata range '
++                                   '(%d tracks), using placeholders',
++                                   track_number, len(metadata.tracks))
++                    v['a'] = metadata.artist
++                    v['s'] = metadata.sortName
++                    v['n'] = 'Unknown Track %d' % track_number
+             elif track_number == 0:
+                 # htoa defaults to disc's artist
+                 v['a'] = metadata.artist

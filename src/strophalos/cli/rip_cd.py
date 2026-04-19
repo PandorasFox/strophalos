@@ -7,13 +7,60 @@ whipper output templates, and handles post-rip directory cleanup.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
 import re
 import shutil
+import struct
 import subprocess
 from pathlib import Path
 
 from strophalos.core.notify import notify
+
+# Linux CDROM ioctl — reads the full TOC including data tracks. libdiscid's
+# discid.read() omits data tracks for multi-session discs, which produces an
+# audio-only CDTOC that MB will refuse to attach to mixed-mode releases.
+_CDROMREADTOCHDR = 0x5305
+_CDROMREADTOCENTRY = 0x5306
+_CDROM_LEADOUT = 0xAA
+_CDROM_LBA = 0x01
+
+
+def _read_full_toc(device: str) -> tuple[int, int, int, list[tuple[int, bool]]] | None:
+    """Read the full CD TOC from the kernel, including data tracks.
+
+    Returns (first_track, last_track, leadout_offset, [(track_offset, is_data), ...])
+    with offsets in MB's sector convention (LBA + 150 for the 2-second lead-in).
+    Returns None if the device can't be opened or the ioctl fails.
+    """
+    try:
+        fd = os.open(device, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        hdr = bytearray(2)
+        fcntl.ioctl(fd, _CDROMREADTOCHDR, hdr, True)
+        first, last = hdr[0], hdr[1]
+
+        def _entry(track_num: int) -> tuple[int, bool]:
+            # struct cdrom_tocentry: track(1) adr_ctrl(1) format(1) pad(1) lba(4) datamode(1) pad(3) = 12
+            buf = bytearray(12)
+            buf[0] = track_num & 0xFF
+            buf[2] = _CDROM_LBA
+            fcntl.ioctl(fd, _CDROMREADTOCENTRY, buf, True)
+            lba = struct.unpack("<i", bytes(buf[4:8]))[0]
+            # Kernel packs bitfield as adr:4 (low nibble) | ctrl:4 (high nibble).
+            # Data-track flag is ctrl & 0x04, i.e. byte & 0x40.
+            is_data = bool(buf[1] & 0x40)
+            return lba + 150, is_data
+
+        tracks = [_entry(t) for t in range(first, last + 1)]
+        leadout, _ = _entry(_CDROM_LEADOUT)
+        return first, last, leadout, tracks
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
 
 
 def _query_disc_info(device: str) -> dict:
@@ -35,6 +82,18 @@ def _query_disc_info(device: str) -> dict:
         musicbrainzngs.set_hostname("musicbrainz.org")
 
         disc = discid.read(device)
+
+        # Mixed-mode override: if the kernel's full TOC contains a data track,
+        # re-derive the disc ID from all tracks. MB stores mixed-mode CDTOCs
+        # with the data track included, and the attach endpoint won't accept
+        # the audio-only form libdiscid produces by default.
+        toc = _read_full_toc(device)
+        if toc is not None:
+            first, last, leadout, entries = toc
+            if any(is_data for _, is_data in entries):
+                offsets = [off for off, _ in entries]
+                disc = discid.put(first, last, leadout, offsets)
+
         info["disc_id"] = disc.id
         info["submission_url"] = disc.submission_url
 

@@ -56,8 +56,9 @@ COPY --from=build /usr/share/MakeMKV /usr/share/MakeMKV
 
 RUN ldconfig
 
-# whipper patch + strophalos package source
+# whipper patches + strophalos package source
 COPY patches/ambiguous-release.patch /tmp/ambiguous-release.patch
+COPY patches/track-metadata-mismatch.patch /tmp/track-metadata-mismatch.patch
 COPY pyproject.toml /tmp/strophalos/pyproject.toml
 COPY src/ /tmp/strophalos/src/
 
@@ -101,10 +102,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && git clone --depth 1 https://github.com/whipper-team/whipper.git /tmp/whipper \
     && cd /tmp/whipper \
     && patch -p1 < /tmp/ambiguous-release.patch \
+    && patch -p1 < /tmp/track-metadata-mismatch.patch \
     && pip3 install --break-system-packages --no-deps . \
     && cd / \
     && pip3 install --break-system-packages /tmp/strophalos \
-    && rm -rf /tmp/whipper /tmp/ambiguous-release.patch /tmp/strophalos \
+    && rm -rf /tmp/whipper /tmp/ambiguous-release.patch /tmp/track-metadata-mismatch.patch /tmp/strophalos \
     && ln -s /usr/bin/cdparanoia /usr/bin/cd-paranoia \
     && apt-get purge -y python3-dev python3-pip gcc git patch libsndfile1-dev \
     && apt-get autoremove --purge -y \
