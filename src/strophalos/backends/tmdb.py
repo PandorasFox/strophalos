@@ -6,6 +6,7 @@ import os
 import re
 
 from strophalos.backends.kagi import search_disc_title
+from strophalos.core.fs import strip_pressing_code
 from strophalos.core.http import build_url, get_json
 from strophalos.types import Episode
 
@@ -32,24 +33,26 @@ def clean_movie_label(label: str) -> str:
     return name.strip()
 
 
-def strip_pressing_code(label: str) -> str | None:
-    """Strip trailing disc pressing/mastering codes from a label.
-
-    Publishers embed short codes like UPK75, FPB42, etc. at the end of
-    volume labels.  Pattern: 2-5 uppercase letters + 2-3 digits, preceded
-    by an underscore or space.  Returns the stripped label, or None if
-    nothing was stripped (so callers can skip a redundant retry).
-    """
-    stripped = re.sub(r"[\s_]+[A-Z]{2,5}\d{2,3}$", "", label)
-    return stripped if stripped != label else None
-
-
 # ---------------------------------------------------------------------------
 # Movie search
 # ---------------------------------------------------------------------------
 
 
-def search_movie(label: str, duration_seconds: float = 0) -> dict | None:
+def _clean_mkv_title(stem: str) -> str | None:
+    """Extract a title from a MakeMKV filename stem.
+
+    MakeMKV embeds the real title in the output filename, e.g.
+    ``How to Train Your Dragon- The Hidden World_t01``.  Strip the
+    trailing ``_tNN`` track index and tidy up punctuation.
+    """
+    name = re.sub(r"_t\d{2,3}$", "", stem)
+    name = name.replace("_", " ").replace("- ", ": ").strip(" -–—:")
+    return name if name else None
+
+
+def search_movie(
+    label: str, duration_seconds: float = 0, mkv_title: str | None = None,
+) -> dict | None:
     """Search TMDb for a movie. Returns best result dict or None.
 
     When *duration_seconds* is provided, fetches runtimes for the top results
@@ -61,14 +64,27 @@ def search_movie(label: str, duration_seconds: float = 0) -> dict | None:
     if not query:
         return None
 
-    data = _tmdb_get("/search/movie", {"query": query})
-    if not data:
-        return None
+    results: list[dict] = []
 
-    results = data.get("results", [])
+    # Prefer MKV title — MakeMKV embeds the real title in the filename
+    if mkv_title:
+        clean_title = _clean_mkv_title(mkv_title)
+        if clean_title:
+            print(f"  TMDb: searching MKV title — '{clean_title}'")
+            data = _tmdb_get("/search/movie", {"query": clean_title})
+            if data:
+                results = data.get("results", [])
+
+    # Fallback 1: disc label
     if not results:
-        print(f"  TMDb: no movie results for '{query}'")
-        # Fallback 1: strip pressing code (e.g. UPK75) and retry
+        data = _tmdb_get("/search/movie", {"query": query})
+        if data:
+            results = data.get("results", [])
+        if not results:
+            print(f"  TMDb: no movie results for '{query}'")
+
+    # Fallback 2: strip pressing code (e.g. UPK75) and retry
+    if not results:
         stripped = strip_pressing_code(label)
         if stripped:
             retry_query = clean_movie_label(stripped)
@@ -77,16 +93,18 @@ def search_movie(label: str, duration_seconds: float = 0) -> dict | None:
                 data = _tmdb_get("/search/movie", {"query": retry_query})
                 if data:
                     results = data.get("results", [])
-        # Fallback 2: web search for the mangled label, then re-query TMDb
-        if not results:
-            kagi_title = search_disc_title(label, media_type="movie")
-            if kagi_title and kagi_title.lower() != query.lower():
-                print(f"  TMDb: retrying with Kagi-resolved title '{kagi_title}'")
-                data = _tmdb_get("/search/movie", {"query": kagi_title})
-                if data:
-                    results = data.get("results", [])
-        if not results:
-            return None
+
+    # Fallback 3: web search for the mangled label, then re-query TMDb
+    if not results:
+        kagi_title = search_disc_title(label, media_type="movie")
+        if kagi_title and kagi_title.lower() != query.lower():
+            print(f"  TMDb: retrying with Kagi-resolved title '{kagi_title}'")
+            data = _tmdb_get("/search/movie", {"query": kagi_title})
+            if data:
+                results = data.get("results", [])
+
+    if not results:
+        return None
 
     # Without a duration hint, just take the top result.
     if not duration_seconds or len(results) == 1:

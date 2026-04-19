@@ -50,7 +50,7 @@ def main() -> None:
     duration = get_mkv_duration(main_feature)
     if duration:
         print(f"  Duration: {duration / 60:.0f}m")
-    movie = search_movie(args.label, duration_seconds=duration)
+    movie = search_movie(args.label, duration_seconds=duration, mkv_title=main_feature.stem)
     if not movie:
         clean = clean_movie_label(args.label)
         msg = f"No TMDb match for '{clean}'. Add the movie at https://www.themoviedb.org and re-run."

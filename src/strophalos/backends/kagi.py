@@ -6,6 +6,7 @@ import os
 import re
 
 from strophalos.core.cache import _MISS, DiskCache
+from strophalos.core.fs import strip_pressing_code
 from strophalos.core.http import build_url, get_json
 
 API_BASE = "https://kagi.com/api/v0"
@@ -22,7 +23,7 @@ def search_disc_title(label: str, media_type: str = "movie") -> str | None:
     if not api_key:
         return None
 
-    query = label.replace("_", " ").strip()
+    query = (strip_pressing_code(label) or label).replace("_", " ").strip()
     if not query:
         return None
 
