@@ -32,6 +32,18 @@ def clean_movie_label(label: str) -> str:
     return name.strip()
 
 
+def strip_pressing_code(label: str) -> str | None:
+    """Strip trailing disc pressing/mastering codes from a label.
+
+    Publishers embed short codes like UPK75, FPB42, etc. at the end of
+    volume labels.  Pattern: 2-5 uppercase letters + 2-3 digits, preceded
+    by an underscore or space.  Returns the stripped label, or None if
+    nothing was stripped (so callers can skip a redundant retry).
+    """
+    stripped = re.sub(r"[\s_]+[A-Z]{2,5}\d{2,3}$", "", label)
+    return stripped if stripped != label else None
+
+
 # ---------------------------------------------------------------------------
 # Movie search
 # ---------------------------------------------------------------------------
@@ -56,13 +68,23 @@ def search_movie(label: str, duration_seconds: float = 0) -> dict | None:
     results = data.get("results", [])
     if not results:
         print(f"  TMDb: no movie results for '{query}'")
-        # Fallback: web search for the mangled label, then re-query TMDb
-        kagi_title = search_disc_title(label, media_type="movie")
-        if kagi_title and kagi_title.lower() != query.lower():
-            print(f"  TMDb: retrying with Kagi-resolved title '{kagi_title}'")
-            data = _tmdb_get("/search/movie", {"query": kagi_title})
-            if data:
-                results = data.get("results", [])
+        # Fallback 1: strip pressing code (e.g. UPK75) and retry
+        stripped = strip_pressing_code(label)
+        if stripped:
+            retry_query = clean_movie_label(stripped)
+            if retry_query and retry_query.lower() != query.lower():
+                print(f"  TMDb: retrying without pressing code — '{retry_query}'")
+                data = _tmdb_get("/search/movie", {"query": retry_query})
+                if data:
+                    results = data.get("results", [])
+        # Fallback 2: web search for the mangled label, then re-query TMDb
+        if not results:
+            kagi_title = search_disc_title(label, media_type="movie")
+            if kagi_title and kagi_title.lower() != query.lower():
+                print(f"  TMDb: retrying with Kagi-resolved title '{kagi_title}'")
+                data = _tmdb_get("/search/movie", {"query": kagi_title})
+                if data:
+                    results = data.get("results", [])
         if not results:
             return None
 
@@ -122,9 +144,19 @@ def search_series(label: str) -> tuple[int, str] | None:
     results = data.get("results", [])
     if not results:
         print(f"  TMDb: no TV results for '{query}'")
-        kagi_title = search_disc_title(label, media_type="tv")
-        if kagi_title and kagi_title.lower() != query.lower():
-            print(f"  TMDb: retrying with Kagi-resolved title '{kagi_title}'")
+        stripped = strip_pressing_code(label)
+        if stripped:
+            retry_query = re.sub(r"\s*(S\d+|D\d+|DISC\s*\d+|BDMV|BD|DVD|UHD)\s*$", "",
+                                 stripped.replace("_", " ").strip(), flags=re.IGNORECASE).strip()
+            if retry_query and retry_query.lower() != query.lower():
+                print(f"  TMDb: retrying without pressing code — '{retry_query}'")
+                data = _tmdb_get("/search/tv", {"query": retry_query})
+                if data:
+                    results = data.get("results", [])
+        if not results:
+            kagi_title = search_disc_title(label, media_type="tv")
+            if kagi_title and kagi_title.lower() != query.lower():
+                print(f"  TMDb: retrying with Kagi-resolved title '{kagi_title}'")
             data = _tmdb_get("/search/tv", {"query": kagi_title})
             if data:
                 results = data.get("results", [])
