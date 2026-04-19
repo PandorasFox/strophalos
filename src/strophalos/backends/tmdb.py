@@ -146,8 +146,12 @@ def search_series(label: str) -> tuple[int, str] | None:
         print(f"  TMDb: no TV results for '{query}'")
         stripped = strip_pressing_code(label)
         if stripped:
-            retry_query = re.sub(r"\s*(S\d+|D\d+|DISC\s*\d+|BDMV|BD|DVD|UHD)\s*$", "",
-                                 stripped.replace("_", " ").strip(), flags=re.IGNORECASE).strip()
+            retry_query = re.sub(
+                r"\s*(S\d+|D\d+|DISC\s*\d+|BDMV|BD|DVD|UHD)\s*$",
+                "",
+                stripped.replace("_", " ").strip(),
+                flags=re.IGNORECASE,
+            ).strip()
             if retry_query and retry_query.lower() != query.lower():
                 print(f"  TMDb: retrying without pressing code — '{retry_query}'")
                 data = _tmdb_get("/search/tv", {"query": retry_query})
