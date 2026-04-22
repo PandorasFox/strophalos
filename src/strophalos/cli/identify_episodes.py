@@ -20,11 +20,12 @@ from pathlib import Path
 
 from strophalos.backends import anidb, opensubtitles
 from strophalos.backends.tmdb import fetch_all_episodes
+from strophalos.backends.tvdb import supplement_episodes
 from strophalos.core.fs import parse_season_disc, sanitize_filename
 from strophalos.core.mkv import get_mkv_duration
 from strophalos.core.notify import notify
 from strophalos.daemon.manifest import write_conflict
-from strophalos.identify.assignment import assign_episodes, find_best_window
+from strophalos.identify.assignment import assign_episodes, build_double_episode_window, find_best_window
 from strophalos.identify.subtitles import extract_subtitles
 from strophalos.types import Episode, MatchResult, RippedFile
 
@@ -105,6 +106,7 @@ def main() -> None:
         print(f"  {mkv.name}: {dur:.0f}s")
 
     results: dict[Path, MatchResult] = {}
+    double_extra_links: list[tuple[RippedFile, Episode, MatchResult]] = []
     remaining = list(files)
     pipeline_notes: list[str] = []
 
@@ -162,6 +164,12 @@ def main() -> None:
                     episodes = season_eps
                 else:
                     print(f"  Warning: no episodes for season {label_season}, using all seasons")
+
+            # Check TVDB for a better episode list (TMDb groups can be wrong)
+            if label_season is not None and tmdb_name:
+                tvdb_eps = supplement_episodes(tmdb_name, label_season, episodes)
+                if tvdb_eps:
+                    episodes = tvdb_eps
 
             # Exclude already-matched and already-linked episodes
             matched_ep_keys = {(r.episode.season, r.episode.episode) for r in results.values()}
@@ -252,6 +260,33 @@ def main() -> None:
                     # Default: next N unlinked episodes (discs ripped in order)
                     window = episodes[:n]
 
+                # Try a double-episode-aware window as a competing candidate
+                dbl_result = build_double_episode_window(remaining, episodes)
+                skip_window, double_indices, skipped_map = (
+                    dbl_result if dbl_result else (None, frozenset(), {})
+                )
+                use_doubles = False
+
+                if skip_window and window:
+                    # Race both windows, keep the higher-scoring one
+                    normal_assign = assign_episodes(remaining, window, reference_subs)
+                    skip_assign = assign_episodes(remaining, skip_window, reference_subs, double_indices)
+                    normal_total = sum(s for _, _, s in normal_assign)
+                    skip_total = sum(s for _, _, s in skip_assign)
+                    if skip_total > normal_total:
+                        print(f"  Double-episode window beats sequential ({skip_total:.2f} vs {normal_total:.2f})")
+                        window = skip_window
+                        assignments = skip_assign
+                        use_doubles = True
+                    else:
+                        assignments = normal_assign
+                elif skip_window:
+                    window = skip_window
+                    assignments = None  # will be computed below
+                    use_doubles = True
+                else:
+                    assignments = None
+
                 if not window:
                     print("  No candidate episodes remaining")
                 elif len(window) < n:
@@ -260,7 +295,8 @@ def main() -> None:
                 if window:
                     print(f"  Window: {window[0].code}–{window[-1].code} ({len(window)} episode(s) for {n} file(s))")
 
-                    assignments = assign_episodes(remaining, window, reference_subs)
+                    if assignments is None:
+                        assignments = assign_episodes(remaining, window, reference_subs, double_indices)
                     method = "reference subtitle match" if reference_subs else "duration"
 
                     # Confidence gate: if all scores are weak, refuse to link
@@ -292,6 +328,14 @@ def main() -> None:
                                     method=method,
                                     score=score,
                                 )
+
+                        # Double-length files also claim the absorbed episode
+                        if use_doubles and skipped_map:
+                            for file_idx, skipped_ep in skipped_map.items():
+                                f = remaining[file_idx]
+                                if f.path in results:
+                                    primary = results[f.path]
+                                    double_extra_links.append((f, skipped_ep, primary))
 
     # --- Hard-link matched files to library ---
     unmatched_names: list[str] = []
@@ -338,6 +382,36 @@ def main() -> None:
             "title": r.episode.title,
             "method": r.method,
             "score": round(r.score, 2),
+        }
+
+    # Extra links for absorbed episodes (double-length files claim two slots)
+    for f, skipped_ep, primary in double_extra_links:
+        title_safe = sanitize_filename(skipped_ep.title)
+        new_name = f"{skipped_ep.code} - {title_safe}.mkv" if title_safe else f"{skipped_ep.code}.mkv"
+        link_path = lib_series_dir / new_name
+
+        if link_path.exists():
+            if link_path.stat().st_ino == f.path.stat().st_ino:
+                print(f"  skip (already linked): {f.path.name} → {new_name}")
+                continue
+            print(f"  conflict: {new_name} exists with different inode")
+            continue
+
+        action = "would link" if args.dry_run else "link"
+        rel_path = link_path.relative_to(library_dir) if library_dir in link_path.parents else new_name
+        print(f"  {action}: {f.path.name} → {rel_path}  [double-episode alias for {primary.episode.code}]")
+
+        if not args.dry_run:
+            lib_series_dir.mkdir(parents=True, exist_ok=True)
+            os.link(f.path, link_path)
+
+        matched_manifest[new_name] = {
+            "original": str(f.path),
+            "season": skipped_ep.season,
+            "episode": skipped_ep.episode,
+            "title": skipped_ep.title,
+            "method": f"double-episode alias ({primary.episode.code})",
+            "score": round(primary.score, 2),
         }
 
     if unmatched_names:

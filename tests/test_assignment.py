@@ -7,6 +7,7 @@ from pathlib import Path
 from strophalos.identify.assignment import (
     _build_score_matrix,
     assign_episodes,
+    build_double_episode_window,
     find_best_window,
     hungarian_assignment,
 )
@@ -206,3 +207,121 @@ class TestAssignEpisodes:
         # Duration signal should override forward bonus: file 0 (2800) → ep 1 (2800)
         assert assignments[0] == 1
         assert assignments[1] == 0
+
+
+# ---------------------------------------------------------------------------
+# build_double_episode_window
+# ---------------------------------------------------------------------------
+
+
+class TestBuildDoubleEpisodeWindow:
+    def _make_episodes(self, count: int, runtime: float = 2700, season: int = 2) -> list[Episode]:
+        return [Episode(season, i + 1, f"Episode {i + 1}", runtime_seconds=runtime) for i in range(count)]
+
+    def test_no_doubles_returns_none(self):
+        """All files are normal length — no skip window needed."""
+        files = [RippedFile(path=Path(f"{i}.mkv"), duration_seconds=2700) for i in range(3)]
+        episodes = self._make_episodes(6)
+        assert build_double_episode_window(files, episodes) is None
+
+    def test_single_double_at_start(self):
+        """First file is double-length — should skip E02, return [E01, E03, E04]."""
+        files = [
+            RippedFile(path=Path("a.mkv"), duration_seconds=5400),  # ~2x normal
+            RippedFile(path=Path("b.mkv"), duration_seconds=2700),
+            RippedFile(path=Path("c.mkv"), duration_seconds=2700),
+        ]
+        episodes = self._make_episodes(6)
+        result = build_double_episode_window(files, episodes)
+        assert result is not None
+        window, double_indices, skipped_map = result
+        assert [ep.episode for ep in window] == [1, 3, 4]
+        assert double_indices == frozenset({0})
+        assert 0 in skipped_map
+        assert skipped_map[0].episode == 2  # E02 absorbed by file 0
+
+    def test_mr_robot_s02_scenario(self):
+        """Mr. Robot S02: file 0 is ~90 min (E01+E02), files 1-2 are ~45 min.
+
+        TMDb reports E01-E04 all at ~45 min each.
+        The double-skip window should produce [E01, E03, E04].
+        """
+        files = [
+            RippedFile(path=Path("t00.mkv"), duration_seconds=5400),  # 90 min
+            RippedFile(path=Path("t01.mkv"), duration_seconds=2700),  # 45 min
+            RippedFile(path=Path("t02.mkv"), duration_seconds=2700),  # 45 min
+        ]
+        episodes = [
+            Episode(2, 1, "eps2.0_unm4sk-pt1.tc", runtime_seconds=2700),
+            Episode(2, 2, "eps2.0_unm4sk-pt2.tc", runtime_seconds=2700),
+            Episode(2, 3, "eps2.0_logic-b0mb.hc", runtime_seconds=2700),
+            Episode(2, 4, "eps2.0_init_1.asec", runtime_seconds=2700),
+        ]
+        result = build_double_episode_window(files, episodes)
+        assert result is not None
+        window, double_indices, skipped_map = result
+        codes = [ep.code for ep in window]
+        assert codes == ["S02E01", "S02E03", "S02E04"]
+        assert double_indices == frozenset({0})
+        assert skipped_map[0].code == "S02E02"
+
+    def test_mr_robot_s02_scoring(self):
+        """Double-episode window should outscore sequential when file 0 is 2x length.
+
+        With duration-aware scoring, the skip window should give t00 a much
+        better duration score (compared to 2× episode runtime) than the
+        sequential window (compared to 1× runtime).
+        """
+        files = [
+            RippedFile(path=Path("t00.mkv"), duration_seconds=4938),  # actual: 82 min
+            RippedFile(path=Path("t01.mkv"), duration_seconds=3782),  # actual: 63 min
+            RippedFile(path=Path("t02.mkv"), duration_seconds=3922),  # actual: 65 min
+        ]
+        episodes = [
+            Episode(2, 1, "E1", runtime_seconds=2700),
+            Episode(2, 2, "E2", runtime_seconds=2700),
+            Episode(2, 3, "E3", runtime_seconds=2700),
+            Episode(2, 4, "E4", runtime_seconds=2700),
+        ]
+        result = build_double_episode_window(files, episodes)
+        assert result is not None
+        skip_window, double_indices, _ = result
+
+        # Sequential window scores t00 against 1× runtime → poor duration fit
+        seq_matrix = _build_score_matrix(files, episodes[:3], {})
+        # Skip window scores t00 against 2× runtime → much better fit
+        skip_matrix = _build_score_matrix(files, skip_window, {}, double_indices)
+
+        # t00 vs E01: skip window should give dramatically better duration score
+        assert skip_matrix[0][0] > seq_matrix[0][0] + 1.0
+
+    def test_double_in_middle(self):
+        """Double-length file in position 1 — skip over the absorbed episode."""
+        files = [
+            RippedFile(path=Path("a.mkv"), duration_seconds=2700),
+            RippedFile(path=Path("b.mkv"), duration_seconds=5400),  # double
+            RippedFile(path=Path("c.mkv"), duration_seconds=2700),
+        ]
+        episodes = self._make_episodes(6)
+        result = build_double_episode_window(files, episodes)
+        assert result is not None
+        window, double_indices, skipped_map = result
+        assert [ep.episode for ep in window] == [1, 2, 4]
+        assert double_indices == frozenset({1})
+        assert skipped_map[1].episode == 3  # E03 absorbed by file 1
+
+    def test_not_enough_episodes_returns_none(self):
+        """If skipping leaves too few episodes, return None."""
+        files = [
+            RippedFile(path=Path("a.mkv"), duration_seconds=5400),
+            RippedFile(path=Path("b.mkv"), duration_seconds=5400),
+        ]
+        # Only 2 episodes: file 0 → ep 1, skip ep 2, file 1 → nothing left
+        episodes = self._make_episodes(2)
+        assert build_double_episode_window(files, episodes) is None
+
+    def test_no_runtime_info_returns_none(self):
+        """Episodes with no runtime data — can't detect doubles."""
+        files = [RippedFile(path=Path("a.mkv"), duration_seconds=5400)]
+        episodes = [Episode(1, 1, "Ep 1", runtime_seconds=0)]
+        assert build_double_episode_window(files, episodes) is None

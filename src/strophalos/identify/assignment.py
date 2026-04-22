@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from statistics import median
+
 from strophalos.identify.scoring import score_subtitle_similarity
 from strophalos.types import Episode, RippedFile
 
@@ -89,15 +91,22 @@ def _build_score_matrix(
     files: list[RippedFile],
     window: list[Episode],
     reference_subs: dict[tuple[int, int], list[tuple[float, str]]],
+    double_indices: frozenset[int] = frozenset(),
 ) -> list[list[float]]:
-    """Build the N x M score matrix for files against a window of episodes."""
+    """Build the N x M score matrix for files against a window of episodes.
+
+    *double_indices*: file indices whose duration should be compared against
+    2× the episode runtime (double-length episodes covering two slots).
+    """
     matrix: list[list[float]] = []
-    for f in files:
+    for fi, f in enumerate(files):
         row: list[float] = []
+        is_double = fi in double_indices
         for ep in window:
             dur_score = 0.0
             if ep.runtime_seconds > 0:
-                dur_score = max(0, 1.0 - abs(f.duration_seconds - ep.runtime_seconds) / ep.runtime_seconds) * 2.0
+                expected = ep.runtime_seconds * (2 if is_double else 1)
+                dur_score = max(0, 1.0 - abs(f.duration_seconds - expected) / expected) * 2.0
             ref = reference_subs.get((ep.season, ep.episode), [])
             sub_score = score_subtitle_similarity(f.subtitle_texts, ref) if ref and f.subtitle_texts else 0.0
             row.append(dur_score + sub_score)
@@ -140,12 +149,13 @@ def assign_episodes(
     files: list[RippedFile],
     window_episodes: list[Episode],
     reference_subs: dict[tuple[int, int], list[tuple[float, str]]],
+    double_indices: frozenset[int] = frozenset(),
 ) -> list[tuple[int, int, float]]:
     """Assign files to episodes within a window. Returns (file_idx, ep_idx, score)."""
     n = len(files)
     m = len(window_episodes)
 
-    matrix = _build_score_matrix(files, window_episodes, reference_subs)
+    matrix = _build_score_matrix(files, window_episodes, reference_subs, double_indices)
 
     # Try forward ordering: bonus for maintaining disc order = episode order
     forward_matrix = [row[:] for row in matrix]
@@ -182,3 +192,50 @@ def assign_episodes(
         print(f"  Ordering: {best_name} (score={best_total:.2f})")
 
     return best_result
+
+
+def build_double_episode_window(
+    files: list[RippedFile],
+    episodes: list[Episode],
+) -> tuple[list[Episode], frozenset[int], dict[int, Episode]] | None:
+    """Build a window that skips episodes absorbed by double-length files.
+
+    Detects files whose duration is ≥1.5× the median episode runtime
+    (i.e. a double-feature covering two episode slots).  For each such
+    file, the episode after its match is skipped in the window so the
+    remaining files align to the correct later episodes.
+
+    Returns ``(window, double_indices, skipped_map)`` — the adjusted
+    episode window, the set of file indices that are double-length, and
+    a mapping from file index to the episode absorbed by that double —
+    or *None* when no double-length files are detected or there aren't
+    enough episodes.
+    """
+    runtimes = [ep.runtime_seconds for ep in episodes if ep.runtime_seconds > 0]
+    if not runtimes:
+        return None
+
+    med = median(runtimes)
+    if med <= 0:
+        return None
+
+    double_flags = [f.duration_seconds >= 1.5 * med for f in files]
+    if not any(double_flags):
+        return None
+
+    window: list[Episode] = []
+    skipped_map: dict[int, Episode] = {}
+    ep_cursor = 0
+    for file_idx, is_double in enumerate(double_flags):
+        if ep_cursor >= len(episodes):
+            break
+        window.append(episodes[ep_cursor])
+        if is_double and ep_cursor + 1 < len(episodes):
+            skipped_map[file_idx] = episodes[ep_cursor + 1]
+        ep_cursor += 2 if is_double else 1
+
+    if len(window) != len(files):
+        return None
+
+    double_indices = frozenset(i for i, d in enumerate(double_flags) if d)
+    return window, double_indices, skipped_map
