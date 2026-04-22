@@ -193,3 +193,34 @@ class TestClassifyDisc:
         durations = {0: 5000, 1: 2500, 2: 2500, 3: 2500, 4: 2500}
         disc_type, titles, reason, _meta = classify_disc(durations, {}, "SOME_SHOW")
         assert disc_type == "tv"
+
+    @patch("strophalos.ripper.classify.score_musicbrainz", return_value=(0.0, None))
+    @patch("strophalos.ripper.classify.score_title_search", return_value=(0.0, 0.0))
+    def test_box_set_volume_label_forces_tv(self, mock_tmdb, mock_mb):
+        """Compact volume labels (MRROBOT_S2D1_NA) force TV."""
+        durations = {0: 3100, 1: 2800, 2: 2700, 3: 2600}
+        disc_type, titles, reason, _meta = classify_disc(durations, {}, "MRROBOT_S2D1_NA")
+        assert disc_type == "tv"
+        assert "box-set label" in reason
+
+    @patch("strophalos.ripper.classify.score_musicbrainz", return_value=(0.0, None))
+    @patch("strophalos.ripper.classify.score_title_search", return_value=(0.0, 0.0))
+    def test_box_set_pretty_title_forces_tv(self, mock_tmdb, mock_mb):
+        """Natural-form disc titles ("Mr. Robot: Season Two (Disc 1)") force TV —
+        regression for the actual MakeMKV-reported label on Mr. Robot S2D1."""
+        # Mirrors the observed MR_ROBOT S2D1 title shape: long main title +
+        # two episode-length titles + short extras. Without the label boost,
+        # movie and tv tie at ~0.40 and movie wins by a hair.
+        durations = {0: 4937, 1: 3781, 2: 3921, 3: 163, 4: 192, 5: 521}
+        disc_type, titles, reason, _meta = classify_disc(durations, {}, "Mr. Robot: Season Two (Disc 1)")
+        assert disc_type == "tv"
+        assert "box-set label" in reason
+
+    @patch("strophalos.ripper.classify.score_musicbrainz", return_value=(0.0, None))
+    @patch("strophalos.ripper.classify.score_title_search", return_value=(0.0, 0.0))
+    def test_non_box_set_label_unaffected(self, mock_tmdb, mock_mb):
+        """Labels without SxDy structure shouldn't get the TV boost."""
+        durations = {0: 7200, 1: 300, 2: 180}
+        disc_type, titles, reason, _meta = classify_disc(durations, {}, "SOME_MOVIE_2020")
+        assert disc_type == "movie"
+        assert "box-set label" not in reason

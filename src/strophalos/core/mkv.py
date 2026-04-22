@@ -8,7 +8,6 @@ from pathlib import Path
 
 from strophalos.types import SubtitleTrack
 
-
 _EBML_MAGIC = b"\x1a\x45\xdf\xa3"
 
 

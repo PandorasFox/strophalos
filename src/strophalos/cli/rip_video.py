@@ -12,6 +12,7 @@ import os
 import shutil
 from pathlib import Path
 
+from strophalos.core.fs import parse_season_disc, sanitize_filename
 from strophalos.ripper.classify import classify_disc
 from strophalos.ripper.disc_id import compute_disc_id
 from strophalos.ripper.result import RipResult
@@ -439,18 +440,40 @@ def rip_video_disc(
 
     dir_label = label or disc_label or "unknown_disc"
 
+    # TV box sets (Mr. Robot: Season Two (Disc 1), MRROBOT_S1D1_NA, ...) — pull
+    # the series/season/disc out of the label and build a hierarchical path so
+    # each disc lands at {series}/Season NN/Disc NN.  Prefer the pretty title
+    # from MakeMKV since its prefix is already human-readable.
+    box_set = None
+    if disc_type == "tv":
+        box_set = parse_season_disc(disc_label or "") or parse_season_disc(label or "")
+
     # Music BDs go to a separate output path (like audio CDs go to /output-cd)
     if disc_type == "music":
         label_dir = os.path.join(output_bd_audio, dir_label)
+        disc_num = 1
+        while os.path.exists(os.path.join(label_dir, f"disc{disc_num}")):
+            disc_num += 1
+        out_dir = os.path.join(label_dir, f"disc{disc_num}")
+    elif box_set:
+        series_pretty, season_n, disc_n = box_set
+        series_dir = sanitize_filename(series_pretty)
+        label_dir = os.path.join(output, "tv", "rips", media_type, series_dir, f"Season {season_n:02d}")
+        disc_leaf = f"Disc {disc_n:02d}"
+        out_dir = os.path.join(label_dir, disc_leaf)
+        # Re-rip collision: only bump if the target already has content.
+        suffix = 2
+        while os.path.isdir(out_dir) and any(os.scandir(out_dir)):
+            out_dir = os.path.join(label_dir, f"{disc_leaf} ({suffix})")
+            suffix += 1
+        disc_num = disc_n
     else:
         content_type = {"tv": "tv"}.get(disc_type, "movies")
         label_dir = os.path.join(output, content_type, "rips", media_type, dir_label)
-
-    # Auto-increment disc number
-    disc_num = 1
-    while os.path.exists(os.path.join(label_dir, f"disc{disc_num}")):
-        disc_num += 1
-    out_dir = os.path.join(label_dir, f"disc{disc_num}")
+        disc_num = 1
+        while os.path.exists(os.path.join(label_dir, f"disc{disc_num}")):
+            disc_num += 1
+        out_dir = os.path.join(label_dir, f"disc{disc_num}")
 
     # Music BD: special chapter-split rip flow
     if disc_type == "music" and mb_metadata:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from strophalos.backends.musicbrainz import score_musicbrainz
 from strophalos.backends.tmdb import score_title_search
+from strophalos.core.fs import parse_season_disc
 
 
 def _score_movie(
@@ -188,6 +189,19 @@ def classify_disc(
     m_score += m_boost
     t_score += t_boost
 
+    # Box-set volume labels (e.g. MRROBOT_S2D1_NA) are an unambiguous TV
+    # signal — no film pressing uses SxDy structure. Apply a large boost
+    # rather than an override so a malformed scorer run still has a voice.
+    box_set_note = ""
+    if disc_label and parse_season_disc(disc_label):
+        t_score += 0.5
+        box_set_note = ", box-set label: +0.5t"
+        # If the TV scorer bailed (too few candidates / no cluster) but the
+        # label says TV, fall back to all meaningful titles so we don't return
+        # an empty rip list.
+        if not t_titles:
+            t_titles = sorted(tid for tid, _ in meaningful)
+
     # Weak MB match logging
     if mb_score > 0.3:
         print(f"  MusicBrainz: weak match (score={mb_score:.2f}), not overriding")
@@ -195,6 +209,7 @@ def classify_disc(
     search_note = ""
     if m_boost or t_boost:
         search_note = f", search: +{m_boost:.1f}m/+{t_boost:.1f}t"
+    search_note += box_set_note
 
     print(f"\n  Scores: movie={m_score:.2f} [{m_reason}]")
     print(f"          tv={t_score:.2f} [{t_reason}]")

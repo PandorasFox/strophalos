@@ -51,7 +51,9 @@ def _clean_mkv_title(stem: str) -> str | None:
 
 
 def search_movie(
-    label: str, duration_seconds: float = 0, mkv_title: str | None = None,
+    label: str,
+    duration_seconds: float = 0,
+    mkv_title: str | None = None,
 ) -> dict | None:
     """Search TMDb for a movie. Returns best result dict or None.
 

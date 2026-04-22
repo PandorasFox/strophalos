@@ -200,8 +200,13 @@ def main() -> None:
                         need_subs = True
                         if candidates:
                             codes = ", ".join(ep.code for ep in candidates)
-                            print(f"  {f.path.name} ({f.duration_seconds:.0f}s): {len(candidates)} duration candidates — {codes}")
-                            pipeline_notes.append(f"Duration: ambiguous ({len(candidates)} candidates for {f.path.name})")
+                            print(
+                                f"  {f.path.name} ({f.duration_seconds:.0f}s): "
+                                f"{len(candidates)} duration candidates — {codes}"
+                            )
+                            pipeline_notes.append(
+                                f"Duration: ambiguous ({len(candidates)} candidates for {f.path.name})"
+                            )
                         else:
                             print(f"  {f.path.name} ({f.duration_seconds:.0f}s): no duration candidates")
                             pipeline_notes.append(f"Duration: no candidates for {f.path.name}")
