@@ -12,6 +12,7 @@ from strophalos.backends.tmdb import clean_movie_label, search_movie
 from strophalos.core.fs import sanitize_filename
 from strophalos.core.mkv import get_mkv_duration
 from strophalos.core.notify import notify
+from strophalos.daemon.manifest import write_conflict
 
 
 def main() -> None:
@@ -74,8 +75,36 @@ def main() -> None:
         if existing_inode == new_inode:
             print(f"  Already linked (same file): {link_path}")
             return
+
+        # Check if this is an alternate cut (different duration → extended/theatrical)
+        existing_duration = get_mkv_duration(link_path)
+        new_duration = duration or get_mkv_duration(main_feature)
+        duration_diff_min = abs(new_duration - existing_duration) / 60 if (existing_duration and new_duration) else 0
+
+        if duration_diff_min > 8:
+            # Durations differ enough to be a different cut — suffix the longer one
+            if new_duration > existing_duration:
+                suffix = "Extended Cut"
+            else:
+                suffix = "Alternate Cut"
+            link_name = f"{title_safe} - {suffix}.mkv"
+            link_path = movie_dir / link_name
+            print(f"  Detected alternate cut ({duration_diff_min:.0f}m difference) → {suffix}")
+            if link_path.exists():
+                if link_path.stat().st_ino == main_feature.stat().st_ino:
+                    print(f"  Already linked (same file): {link_path}")
+                    return
+                # Alternate cut path also taken — true conflict
+                write_conflict(disc_dir, [{"library_path": str(link_path), "inode": link_path.stat().st_ino}])
+                notify(
+                    f"{title} ({suffix}): link conflict",
+                    f"Library already has a different copy:\n{link_path}\n\nNew rip: {main_feature}\nResolve manually.",
+                    error=True,
+                )
+                return
         else:
             print(f"  Conflict: {link_path} exists with different inode")
+            write_conflict(disc_dir, [{"library_path": str(link_path), "inode": existing_inode}])
             notify(
                 f"{title}: link conflict",
                 f"Library already has a different copy:\n{link_path}\n\nNew rip: {main_feature}\nResolve manually.",

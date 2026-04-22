@@ -22,6 +22,8 @@ IDENTIFY_MANIFESTS = (
     ".music-manifest.json",
 )
 
+CONFLICT_MANIFEST = ".identify-conflict.json"
+
 
 @dataclass
 class RipManifest:
@@ -106,6 +108,45 @@ def update_manifest_failed(output_dir: Path, error: str) -> None:
     write_manifest(output_dir, manifest)
 
 
+def write_conflict(output_dir: Path, conflicts: list[dict]) -> Path:
+    """Write a conflict marker so the identify loop stops re-notifying.
+
+    Each entry in *conflicts* should have ``library_path`` and ``inode`` keys
+    describing the existing library file that caused the conflict.
+    """
+    path = output_dir / CONFLICT_MANIFEST
+    data = {"conflicts": conflicts, "timestamp": datetime.now().isoformat()}
+    path.write_text(json.dumps(data, indent=2))
+    return path
+
+
+def _conflict_still_valid(output_dir: Path) -> bool:
+    """Return True if the conflict marker exists and every conflict is unresolved.
+
+    A conflict is resolved when the library file no longer exists or its inode
+    has changed (the user replaced/removed the blocking file).
+    """
+    path = output_dir / CONFLICT_MANIFEST
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False
+
+    for c in data.get("conflicts", []):
+        lib_path = Path(c["library_path"])
+        if not lib_path.exists():
+            # File removed — conflict resolved
+            path.unlink(missing_ok=True)
+            return False
+        if lib_path.stat().st_ino != c["inode"]:
+            # Inode changed — user replaced the file
+            path.unlink(missing_ok=True)
+            return False
+    return True
+
+
 def find_pending_rips(archive_root: Path) -> list[tuple[Path, RipManifest]]:
     """Find rip directories with status='done' that lack identification manifests."""
     results = []
@@ -119,6 +160,10 @@ def find_pending_rips(archive_root: Path) -> list[tuple[Path, RipManifest]]:
             continue
         rip_dir = manifest_path.parent
         has_id = any((rip_dir / f).exists() for f in IDENTIFY_MANIFESTS)
-        if not has_id:
-            results.append((rip_dir, manifest))
+        if has_id:
+            continue
+        # Skip if there is an unresolved conflict (avoids notification spam)
+        if _conflict_still_valid(rip_dir):
+            continue
+        results.append((rip_dir, manifest))
     return results

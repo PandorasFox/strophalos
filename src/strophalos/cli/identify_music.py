@@ -12,6 +12,7 @@ from strophalos.backends.musicbrainz import search_release
 from strophalos.core.fs import sanitize_filename
 from strophalos.core.mkv import get_mkv_duration
 from strophalos.core.notify import notify
+from strophalos.daemon.manifest import write_conflict
 
 
 def main() -> None:
@@ -69,6 +70,7 @@ def main() -> None:
     # Link in track order
     album_dir = library / "music" / artist / album
     linked = 0
+    conflict_entries: list[dict] = []
 
     for i, track in enumerate(tracks):
         mkv = track_to_file.get(i)
@@ -85,6 +87,7 @@ def main() -> None:
                 print(f"  skip (already linked): {new_name}")
                 continue
             print(f"  conflict: {new_name} exists with different inode")
+            conflict_entries.append({"library_path": str(link_path), "inode": link_path.stat().st_ino})
             notify(f"{artist} - {album}: link conflict", f"{link_path}", error=True)
             continue
 
@@ -95,6 +98,10 @@ def main() -> None:
             album_dir.mkdir(parents=True, exist_ok=True)
             os.link(mkv, link_path)
             linked += 1
+
+    # Write conflict marker (suppresses re-notification on next poll)
+    if conflict_entries and not args.dry_run:
+        write_conflict(disc_dir, conflict_entries)
 
     # Manifest
     if not args.dry_run and linked:

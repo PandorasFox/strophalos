@@ -20,9 +20,10 @@ from pathlib import Path
 
 from strophalos.backends import anidb, opensubtitles
 from strophalos.backends.tmdb import fetch_all_episodes
-from strophalos.core.fs import sanitize_filename
+from strophalos.core.fs import parse_season_disc, sanitize_filename
 from strophalos.core.mkv import get_mkv_duration
 from strophalos.core.notify import notify
+from strophalos.daemon.manifest import write_conflict
 from strophalos.identify.assignment import assign_episodes, find_best_window
 from strophalos.identify.subtitles import extract_subtitles
 from strophalos.types import Episode, MatchResult, RippedFile
@@ -86,7 +87,14 @@ def main() -> None:
 
     print(f"Found {len(mkv_files)} MKV file(s)")
 
-    series_name = args.label.replace("_", " ").strip()
+    parsed = parse_season_disc(args.label)
+    if parsed:
+        series_prefix, label_season, label_disc = parsed
+        series_name = series_prefix.replace("_", " ").strip()
+        print(f"  Label: season {label_season}, disc {label_disc}")
+    else:
+        label_season = None
+        series_name = args.label.replace("_", " ").strip()
     library_dir = Path(args.library)
 
     # Build RippedFile objects with durations
@@ -98,6 +106,7 @@ def main() -> None:
 
     results: dict[Path, MatchResult] = {}
     remaining = list(files)
+    pipeline_notes: list[str] = []
 
     # --- Phase 0: Hash-based identification ---
     hash_results = opensubtitles.identify(mkv_files)
@@ -124,6 +133,7 @@ def main() -> None:
 
     if not remaining:
         print("  All files identified via hash lookup")
+        pipeline_notes.append("All files identified via hash lookup")
     else:
         # --- Phase 1+: TMDb + duration + reference subtitles ---
         episodes, specials, group_name, tmdb_name, series_id = fetch_all_episodes(args.label)
@@ -143,6 +153,15 @@ def main() -> None:
         if episodes:
             n_seasons = len({ep.season for ep in episodes})
             print(f"  {len(episodes)} episodes across {n_seasons} season(s)")
+
+            # Filter to the season from the label (e.g. S1D1 → season 1)
+            if label_season is not None:
+                season_eps = [ep for ep in episodes if ep.season == label_season]
+                if season_eps:
+                    print(f"  Filtered to season {label_season}: {len(season_eps)} episode(s)")
+                    episodes = season_eps
+                else:
+                    print(f"  Warning: no episodes for season {label_season}, using all seasons")
 
             # Exclude already-matched and already-linked episodes
             matched_ep_keys = {(r.episode.season, r.episode.episode) for r in results.values()}
@@ -171,6 +190,13 @@ def main() -> None:
                     ]
                     if len(candidates) != 1:
                         need_subs = True
+                        if candidates:
+                            codes = ", ".join(ep.code for ep in candidates)
+                            print(f"  {f.path.name} ({f.duration_seconds:.0f}s): {len(candidates)} duration candidates — {codes}")
+                            pipeline_notes.append(f"Duration: ambiguous ({len(candidates)} candidates for {f.path.name})")
+                        else:
+                            print(f"  {f.path.name} ({f.duration_seconds:.0f}s): no duration candidates")
+                            pipeline_notes.append(f"Duration: no candidates for {f.path.name}")
                         break
 
                 # Fetch reference subs only if duration doesn't fully solve it
@@ -179,6 +205,7 @@ def main() -> None:
                     reference_subs = opensubtitles.fetch_reference_subs(episodes, series_id)
 
                 if need_subs and reference_subs:
+                    pipeline_notes.append("Falling back to subtitle matching")
                     print("  Duration-only matching insufficient, extracting subtitles for reference comparison...")
 
                     def _process_file(f: RippedFile) -> tuple[RippedFile, int]:
@@ -208,7 +235,10 @@ def main() -> None:
                                 f.subtitle_texts = [
                                     (t, text) for t, text in f.subtitle_texts if text.strip().lower() not in common_cues
                                 ]
+                elif need_subs and not reference_subs:
+                    pipeline_notes.append("Duration: ambiguous; no reference subs available — using duration only")
                 elif not need_subs:
+                    pipeline_notes.append("Duration matching sufficient")
                     print("  Duration matching sufficient")
 
                 n = len(remaining)
@@ -266,6 +296,7 @@ def main() -> None:
     # --- Hard-link matched files to library ---
     unmatched_names: list[str] = []
     matched_manifest: dict[str, dict] = {}
+    conflict_entries: list[dict] = []
 
     lib_series_dir = library_dir / "tv" / sanitize_filename(series_name)
 
@@ -284,6 +315,7 @@ def main() -> None:
                 print(f"  skip (already linked): {f.path.name} → {new_name}")
                 continue
             print(f"  conflict: {new_name} exists with different inode")
+            conflict_entries.append({"library_path": str(link_path), "inode": link_path.stat().st_ino})
             notify(
                 f"{series_name} {r.episode.code}: link conflict",
                 f"Library already has a different copy:\n{link_path}\n\nNew rip: {f.path}\nResolve manually.",
@@ -311,6 +343,10 @@ def main() -> None:
     if unmatched_names:
         print(f"  Unmatched: {unmatched_names}")
 
+    # --- Write conflict marker (suppresses re-notification on next poll) ---
+    if conflict_entries and not args.dry_run:
+        write_conflict(out_dir, conflict_entries)
+
     # --- Write manifest ---
     if not args.dry_run and matched_manifest:
         manifest = {
@@ -337,7 +373,13 @@ def main() -> None:
     lines.append("")
     for method, mrs in sorted(by_method.items()):
         r_str = _format_ranges(mrs)
-        lines.append(f"{method}: {r_str}")
+        scores = sorted([r.score for r in mrs], reverse=True)
+        score_str = ", ".join(f"{s:.1f}" for s in scores)
+        lines.append(f"{method}: {r_str} (scores: {score_str})")
+    if pipeline_notes:
+        lines.append("")
+        for note in pipeline_notes:
+            lines.append(note)
     lines.append("")
     lines.append(f"{len(files)} title(s) → {len(matched_manifest)} linked to library")
     if unmatched_names:

@@ -6,7 +6,7 @@ import os
 import re
 
 from strophalos.backends.kagi import search_disc_title
-from strophalos.core.fs import strip_pressing_code
+from strophalos.core.fs import parse_season_disc, strip_pressing_code
 from strophalos.core.http import build_url, get_json
 from strophalos.types import Episode
 
@@ -150,8 +150,12 @@ def search_movie(
 
 def search_series(label: str) -> tuple[int, str] | None:
     """Search TMDb for a TV series. Returns (series_id, name) or None."""
-    query = label.replace("_", " ").strip()
-    query = re.sub(r"\s*(S\d+|D\d+|DISC\s*\d+|BDMV|BD|DVD|UHD)\s*$", "", query, flags=re.IGNORECASE).strip()
+    parsed = parse_season_disc(label)
+    if parsed:
+        query = parsed[0].replace("_", " ").strip()
+    else:
+        query = label.replace("_", " ").strip()
+        query = re.sub(r"\s*(S\d+|D\d+|DISC\s*\d+|BDMV|BD|DVD|UHD)\s*$", "", query, flags=re.IGNORECASE).strip()
     if not query:
         return None
 
@@ -179,9 +183,9 @@ def search_series(label: str) -> tuple[int, str] | None:
             kagi_title = search_disc_title(label, media_type="tv")
             if kagi_title and kagi_title.lower() != query.lower():
                 print(f"  TMDb: retrying with Kagi-resolved title '{kagi_title}'")
-            data = _tmdb_get("/search/tv", {"query": kagi_title})
-            if data:
-                results = data.get("results", [])
+                data = _tmdb_get("/search/tv", {"query": kagi_title})
+                if data:
+                    results = data.get("results", [])
         if not results:
             return None
 

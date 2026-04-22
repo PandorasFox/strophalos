@@ -14,6 +14,18 @@ def sanitize_filename(name: str) -> str:
     return name
 
 
+def parse_season_disc(label: str) -> tuple[str, int, int] | None:
+    """Extract (series_prefix, season, disc) from labels like MRROBOT_S1D1_NA.
+
+    Matches patterns: PREFIX_S{X}D{Y}, PREFIX_S{X}_D{Y}, with optional trailing suffix.
+    Returns None if the label doesn't contain an SxDy pattern.
+    """
+    m = re.match(r"^(.+?)_S(\d+)_?D(\d+)(?:_.*)?$", label, re.IGNORECASE)
+    if not m:
+        return None
+    return m.group(1), int(m.group(2)), int(m.group(3))
+
+
 def strip_pressing_code(label: str) -> str | None:
     """Strip trailing disc pressing/mastering codes from a label.
 
