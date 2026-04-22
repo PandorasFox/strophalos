@@ -84,6 +84,15 @@ def _score_tv(
     variance = sum((d - mean_dur) ** 2 for d in cluster_durs) / len(cluster_durs)
     cv = (variance**0.5) / mean_dur if mean_dur > 0 else 1.0
 
+    # Select episode cluster; include longest only if it's episode-length itself.
+    # Computed upfront so the reason reports the actual rip count rather than
+    # the cluster count (which excludes the longest title to detect play-all).
+    titles_to_rip = [tid for tid, _ in in_cluster]
+    if median_dur * 0.5 <= longest_dur <= median_dur * 2.0:
+        if longest_tid not in titles_to_rip:
+            titles_to_rip.append(longest_tid)
+    rip_count = len(titles_to_rip)
+
     if cv < 0.05:
         score += 0.35
         reasons.append(f"very uniform (CV {cv:.3f})")
@@ -94,16 +103,16 @@ def _score_tv(
         score += 0.15
         reasons.append(f"somewhat uniform (CV {cv:.2f})")
 
-    # Episode count — more similar titles = stronger TV signal
+    # Episode count — more similar titles = stronger TV signal.  Scoring bands
+    # use cluster size (uniformity-only), but the reason reports rip_count so
+    # the number matches what actually gets ripped.
     if len(in_cluster) >= 6:
         score += 0.3
-        reasons.append(f"{len(in_cluster)} episodes")
     elif len(in_cluster) >= 3:
         score += 0.2
-        reasons.append(f"{len(in_cluster)} episodes")
     else:
         score += 0.05
-        reasons.append(f"{len(in_cluster)} episodes")
+    reasons.append(f"{rip_count} episodes")
 
     # Play-all detection — longest ≈ sum of cluster
     cluster_sum = sum(dur for _, dur in in_cluster)
@@ -117,12 +126,6 @@ def _score_tv(
     if 1200 <= median_dur <= 3900:
         score += 0.1
         reasons.append("typical episode length")
-
-    # Select episode cluster; include longest only if it's episode-length itself
-    titles_to_rip = [tid for tid, _ in in_cluster]
-    if median_dur * 0.5 <= longest_dur <= median_dur * 2.0:
-        if longest_tid not in titles_to_rip:
-            titles_to_rip.append(longest_tid)
 
     return score, sorted(titles_to_rip), "; ".join(reasons)
 

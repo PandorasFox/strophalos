@@ -267,9 +267,7 @@ def main() -> None:
 
                 # Try a double-episode-aware window as a competing candidate
                 dbl_result = build_double_episode_window(remaining, episodes)
-                skip_window, double_indices, skipped_map = (
-                    dbl_result if dbl_result else (None, frozenset(), {})
-                )
+                skip_window, double_indices, skipped_map = dbl_result if dbl_result else (None, frozenset(), {})
                 use_doubles = False
 
                 if skip_window and window:

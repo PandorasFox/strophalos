@@ -16,7 +16,7 @@ from strophalos.core.fs import parse_season_disc, sanitize_filename
 from strophalos.ripper.classify import classify_disc
 from strophalos.ripper.disc_id import compute_disc_id
 from strophalos.ripper.result import RipResult
-from strophalos.ripper.rip import rip_titles
+from strophalos.ripper.rip import TitleRipFailed, rip_titles
 from strophalos.ripper.scan import (
     detect_media_type,
     get_title_chapters,
@@ -491,7 +491,15 @@ def rip_video_disc(
         track_count = _rip_music_bd(drive, out_dir, durations, chapters, to_rip, mb_metadata)
     else:
         print(f"\nRipping {len(to_rip)} title(s) to {out_dir}...")
-        rip_titles(drive, to_rip, out_dir)
+        try:
+            rip_titles(drive, to_rip, out_dir)
+        except TitleRipFailed as e:
+            # Unrecoverable title failure (hash/CRC/read error).  The partial
+            # output is useless — a clean re-rip on a re-inserted disc will
+            # want the canonical path free of stale files.
+            print(f"  Disc rip aborted: {e}. Cleaning up {out_dir}.")
+            shutil.rmtree(out_dir, ignore_errors=True)
+            return None
         track_count = len(to_rip)
 
     # Validate ripped files — MakeMKV can exit 0 but write corrupt output

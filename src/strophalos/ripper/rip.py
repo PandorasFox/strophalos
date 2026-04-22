@@ -3,11 +3,31 @@
 from __future__ import annotations
 
 import os
+import re
 import selectors
 import signal
 import subprocess
 import time
 from pathlib import Path
+
+# makemkvcon MSG lines terminating the save operation carry (saved, failed)
+# counts.  When failed > 0 the process may still exit 0, which is how titles
+# vanish silently on HashCheck / LIBMKV read errors (see S4D2 t01 incident).
+_MSG_SAVE_RESULT = re.compile(r"^MSG:(?:5004|5037),")
+_MSG_ARGS = re.compile(r'"([^"]*)"')
+
+
+class TitleRipFailed(Exception):
+    """A single title exhausted its retries with no output file.  Callers
+    should treat the disc rip as failed — hash/read errors are deterministic,
+    so continuing with remaining titles produces a partial archive that will
+    need to be thrown away and re-ripped anyway."""
+
+    def __init__(self, tid: int, attempts: int) -> None:
+        super().__init__(f"title {tid} failed after {attempts} attempt(s)")
+        self.tid = tid
+        self.attempts = attempts
+
 
 # How long makemkvcon can go without producing any output before we kill it.
 # makemkvcon appears to block-buffer stdout on non-TTY during the `mkv` command,
@@ -59,6 +79,7 @@ def rip_titles(
             output_tail: list[str] = []
             timed_out = False
             read_buf = b""
+            msg_failed_count = 0
 
             assert proc.stdout is not None
             sel = selectors.DefaultSelector()
@@ -106,6 +127,15 @@ def rip_titles(
                                             last_pct = pct
                                     except (ValueError, ZeroDivisionError):
                                         pass
+                            elif _MSG_SAVE_RESULT.match(line):
+                                # MSG:5004 / MSG:5037 carry (saved, failed) as
+                                # the last two quoted arguments.
+                                args = _MSG_ARGS.findall(line)
+                                if len(args) >= 2:
+                                    try:
+                                        msg_failed_count = max(msg_failed_count, int(args[-1]))
+                                    except ValueError:
+                                        pass
                     else:
                         if time.monotonic() - last_activity > STALL_TIMEOUT:
                             print(f"  title {tid}: no output for {STALL_TIMEOUT}s, killing", flush=True)
@@ -117,7 +147,7 @@ def rip_titles(
                 sel.close()
 
             proc.wait()
-            failed = timed_out or proc.returncode != 0
+            failed = timed_out or proc.returncode != 0 or msg_failed_count > 0
             if timed_out:
                 print(f"  WARNING: title {tid} killed (stalled)")
             elif proc.returncode != 0:
@@ -129,6 +159,10 @@ def rip_titles(
                     for sl in stderr_text.strip().split("\n")[-5:]:
                         if sl:
                             print(f"  > {sl}")
+            elif msg_failed_count > 0:
+                print(f"  WARNING: title {tid} failed (makemkvcon reported {msg_failed_count} save failure(s), rc=0)")
+                for sl in output_tail[-5:]:
+                    print(f"  > {sl}")
 
             # Verify makemkvcon actually wrote the expected _tNN.mkv.  Match by
             # title-id suffix and mtime-after-start so a prior stale file
@@ -145,9 +179,12 @@ def rip_titles(
                 break
 
             if not failed:
+                # Belt-and-suspenders: covers the case where makemkvcon exits
+                # 0, reports no MSG:5004/5037 failure, yet writes no file.
                 print(f"  WARNING: title {tid} rc=0 but no _t{tid:02d}.mkv written")
                 for sl in output_tail[-5:]:
                     print(f"  > {sl}")
 
             if attempt >= MAX_ATTEMPTS:
                 print(f"  title {tid}: giving up after {MAX_ATTEMPTS} attempt(s), no output file")
+                raise TitleRipFailed(tid, MAX_ATTEMPTS)
