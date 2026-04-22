@@ -297,8 +297,14 @@ class Orchestrator:
             _log("movie disc — starting identification")
             cmd = ["identify-movie", "--dir", output_dir, "--label", label, "--library", library]
 
+        def _demote() -> None:
+            if os.getuid() == 0:
+                os.setgroups([])
+                os.setgid(self.pgid)
+                os.setuid(self.puid)
+
         try:
-            subprocess.run(cmd, timeout=3600)
+            subprocess.run(cmd, timeout=3600, preexec_fn=_demote)
         except subprocess.TimeoutExpired:
             _log(f"identification timed out for {output_dir}")
         except Exception as e:
