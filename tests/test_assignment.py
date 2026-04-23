@@ -176,24 +176,8 @@ class TestFindBestWindow:
 
 
 class TestAssignEpisodes:
-    def test_forward_order_preferred(self):
-        """When scores are symmetric, forward ordering should get the tiebreak bonus."""
-        files = [
-            RippedFile(path=Path("a.mkv"), duration_seconds=1400),
-            RippedFile(path=Path("b.mkv"), duration_seconds=1400),
-        ]
-        episodes = [
-            Episode(1, 1, "", runtime_seconds=1400),
-            Episode(1, 2, "", runtime_seconds=1400),
-        ]
-        result = assign_episodes(files, episodes, {})
-        assignments = {fi: ei for fi, ei, _ in result}
-        # Forward order: file 0 → ep 0, file 1 → ep 1
-        assert assignments[0] == 0
-        assert assignments[1] == 1
-
     def test_strong_signal_overrides_order(self):
-        """Strong duration mismatch should override the order bonus."""
+        """Duration mismatch drives assignment — no order bias in play."""
         files = [
             RippedFile(path=Path("a.mkv"), duration_seconds=2800),  # long
             RippedFile(path=Path("b.mkv"), duration_seconds=1400),  # short
@@ -204,7 +188,7 @@ class TestAssignEpisodes:
         ]
         result = assign_episodes(files, episodes, {})
         assignments = {fi: ei for fi, ei, _ in result}
-        # Duration signal should override forward bonus: file 0 (2800) → ep 1 (2800)
+        # file 0 (2800) → ep 1 (2800), file 1 (1400) → ep 0 (1400)
         assert assignments[0] == 1
         assert assignments[1] == 0
 

@@ -302,43 +302,46 @@ def main() -> None:
                         assignments = assign_episodes(remaining, window, reference_subs, double_indices)
                     method = "reference subtitle match" if reference_subs else "duration"
 
-                    # Confidence gate: if all scores are weak, refuse to link
-                    # unless --force is set
-                    CONFIDENCE_THRESHOLD = 3.0
-                    scores = [s for _, _, s in assignments]
-                    all_weak = scores and all(s <= CONFIDENCE_THRESHOLD for s in scores)
+                    # Per-file confidence gate. When subtitle matching was the
+                    # active method, require real subtitle evidence (not just a
+                    # duration score of ~2.0); weak files stay unmatched rather
+                    # than being assigned by position. --force bypasses the gate.
+                    # --min-score still applies (duration-only path).
+                    SUB_CONFIDENCE_THRESHOLD = 3.0
+                    sub_gate = bool(reference_subs) and not args.force
 
-                    if all_weak and not args.force:
-                        best_score = max(scores) if scores else 0
-                        msg = (
-                            f"All {len(scores)} match scores are weak "
-                            f"(best={best_score:.2f}, threshold={CONFIDENCE_THRESHOLD:.1f}).\n"
-                            f"This may indicate mismatched subtitles or a non-sequential disc.\n"
-                            f"Re-run manually with --force to link anyway, "
-                            f"or try --search-window for non-sequential discs:\n"
-                            f"  identify-episodes --dir {args.dir} --label {args.label} --force\n"
-                            f"  identify-episodes --dir {args.dir} --label {args.label} --search-window"
+                    skipped_weak: list[tuple[str, float]] = []
+                    for file_idx, ep_idx, score in assignments:
+                        if score < args.min_score:
+                            continue
+                        if sub_gate and score < SUB_CONFIDENCE_THRESHOLD:
+                            skipped_weak.append((remaining[file_idx].path.name, score))
+                            continue
+                        f = remaining[file_idx]
+                        results[f.path] = MatchResult(
+                            file=f,
+                            episode=window[ep_idx],
+                            method=method,
+                            score=score,
                         )
-                        print(f"  {msg}")
-                        notify(f"{series_name}: low confidence, not linking", msg, error=True)
-                    else:
-                        for file_idx, ep_idx, score in assignments:
-                            if score >= args.min_score:
-                                f = remaining[file_idx]
-                                results[f.path] = MatchResult(
-                                    file=f,
-                                    episode=window[ep_idx],
-                                    method=method,
-                                    score=score,
-                                )
 
-                        # Double-length files also claim the absorbed episode
-                        if use_doubles and skipped_map:
-                            for file_idx, skipped_ep in skipped_map.items():
-                                f = remaining[file_idx]
-                                if f.path in results:
-                                    primary = results[f.path]
-                                    double_extra_links.append((f, skipped_ep, primary))
+                    if skipped_weak:
+                        names = ", ".join(f"{n} ({s:.2f})" for n, s in skipped_weak)
+                        print(
+                            f"  Leaving {len(skipped_weak)} file(s) unmatched "
+                            f"(score < {SUB_CONFIDENCE_THRESHOLD:.1f}): {names}"
+                        )
+                        pipeline_notes.append(
+                            f"{len(skipped_weak)} file(s) unmatched below subtitle confidence threshold"
+                        )
+
+                    # Double-length files also claim the absorbed episode
+                    if use_doubles and skipped_map:
+                        for file_idx, skipped_ep in skipped_map.items():
+                            f = remaining[file_idx]
+                            if f.path in results:
+                                primary = results[f.path]
+                                double_extra_links.append((f, skipped_ep, primary))
 
     # --- Hard-link matched files to library ---
     unmatched_names: list[str] = []

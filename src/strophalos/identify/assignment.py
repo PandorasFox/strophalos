@@ -151,47 +151,17 @@ def assign_episodes(
     reference_subs: dict[tuple[int, int], list[tuple[float, str]]],
     double_indices: frozenset[int] = frozenset(),
 ) -> list[tuple[int, int, float]]:
-    """Assign files to episodes within a window. Returns (file_idx, ep_idx, score)."""
+    """Assign files to episodes within a window. Returns (file_idx, ep_idx, score).
+
+    Pure Hungarian over the raw score matrix — no order bonuses. Discs can be
+    in any order; trust only the evidence in the score matrix. Weak matches are
+    returned with their real score so the caller can gate on it.
+    """
     n = len(files)
     m = len(window_episodes)
-
     matrix = _build_score_matrix(files, window_episodes, reference_subs, double_indices)
-
-    # Try forward ordering: bonus for maintaining disc order = episode order
-    forward_matrix = [row[:] for row in matrix]
-    for i in range(n):
-        if i < m:
-            forward_matrix[i][i] += 0.5
-
-    # Try reverse ordering
-    reverse_matrix = [row[:] for row in matrix]
-    for i in range(n):
-        rev_j = m - 1 - i
-        if 0 <= rev_j < m:
-            reverse_matrix[i][rev_j] += 0.5
-
-    # Solve all three, pick best total
-    candidates = [
-        ("forward", hungarian_assignment(forward_matrix)),
-        ("reverse", hungarian_assignment(reverse_matrix)),
-        ("unordered", hungarian_assignment(matrix)),
-    ]
-
-    best_name = ""
-    best_result: list[tuple[int, int, float]] = []
-    best_total = -1.0
-
-    for name, assignments in candidates:
-        total = sum(matrix[i][j] for i, j, _ in assignments if i < n and j < m)
-        if total > best_total:
-            best_total = total
-            best_result = [(i, j, matrix[i][j]) for i, j, _ in assignments if i < n and j < m]
-            best_name = name
-
-    if best_name:
-        print(f"  Ordering: {best_name} (score={best_total:.2f})")
-
-    return best_result
+    assignments = hungarian_assignment(matrix)
+    return [(i, j, matrix[i][j]) for i, j, _ in assignments if i < n and j < m]
 
 
 def build_double_episode_window(
