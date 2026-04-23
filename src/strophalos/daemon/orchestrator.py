@@ -119,7 +119,7 @@ class Orchestrator:
         _log(f"probe: type={probe.disc_type} label='{probe.label}'")
 
         if self.mode == PipelineMode.PROBE:
-            notify("Disc detected", f"{probe.label} ({probe.disc_type})")
+            notify("Disc detected", f"{probe.label} ({probe.disc_type})", dedup=False)
             self._finish_disc(probe)
             return
 
@@ -182,11 +182,11 @@ class Orchestrator:
     def _rip_video(self, probe: ProbeResult) -> RipResult | None:
         from strophalos.cli.rip_video import rip_video_disc
 
-        notify("Ripping Blu-ray", probe.label)
+        notify("Ripping Blu-ray", probe.label, dedup=False)
 
         result = rip_video_disc(0, probe.label, str(self.archive_root), dry_run=False)
         if result is None:
-            notify("Disc rip failed", probe.label, error=True)
+            notify("Disc rip failed", probe.label, error=True, dedup=False)
             return None
 
         self._write_done_manifest(result)
@@ -194,17 +194,18 @@ class Orchestrator:
         notify(
             "Disc ripped",
             f"{probe.label} — {result.title_count} title(s), {result.disc_type} ({result.media_type})",
+            dedup=False,
         )
         return result
 
     def _rip_dvd(self, probe: ProbeResult) -> RipResult | None:
         from strophalos.cli.rip_dvd import rip_dvd_disc
 
-        notify("Ripping DVD", probe.label)
+        notify("Ripping DVD", probe.label, dedup=False)
 
         result = rip_dvd_disc(self.device, probe.label, str(self.archive_root), dry_run=False)
         if result is None:
-            notify("DVD rip failed", probe.label, error=True)
+            notify("DVD rip failed", probe.label, error=True, dedup=False)
             return None
 
         self._write_done_manifest(result)
@@ -212,6 +213,7 @@ class Orchestrator:
         notify(
             "Disc ripped",
             f"{probe.label} — {result.title_count} title(s), {result.disc_type} (dvd)",
+            dedup=False,
         )
         return result
 
@@ -235,7 +237,7 @@ class Orchestrator:
         from strophalos.cli.rip_data import rip_data_disc
 
         _log("audio+data disc — ripping ISO + audio tracks")
-        notify("Ripping audio+data disc", probe.label)
+        notify("Ripping audio+data disc", probe.label, dedup=False)
         rip_data_disc(self.device, probe.label, str(self.archive_root) + "/iso", dry_run=False)
         rip_audio_cd(self.device)
         return None  # No identification for audio+data

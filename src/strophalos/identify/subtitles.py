@@ -9,19 +9,7 @@ from pathlib import Path
 
 from strophalos.backends.whisper import transcribe
 from strophalos.core.mkv import list_subtitle_tracks, select_best_track
-
-
-def parse_srt(srt_text: str) -> list[tuple[float, str]]:
-    """Parse SRT format into (timestamp_seconds, text) pairs."""
-    results: list[tuple[float, str]] = []
-    for match in re.finditer(r"(\d+):(\d+):([\d,]+)\s*-->.*?\n(.*?)(?:\n\n|\Z)", srt_text, re.DOTALL):
-        h, m = int(match.group(1)), int(match.group(2))
-        s = float(match.group(3).replace(",", "."))
-        timestamp = h * 3600 + m * 60 + s
-        line = re.sub(r"<[^>]+>", "", match.group(4)).strip().replace("\n", " ")
-        if line:
-            results.append((timestamp, line))
-    return results
+from strophalos.identify.srt import parse_srt
 
 
 def extract_subtitles(mkv_path: Path, duration: float, *, full: bool = False) -> list[tuple[float, str]]:
