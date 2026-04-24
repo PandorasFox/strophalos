@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from strophalos.backends.opensubtitles import AuthError, identify, fetch_reference_subs
+from strophalos.backends.opensubtitles import AuthError, fetch_reference_subs, identify
 from strophalos.types import Episode
 
 

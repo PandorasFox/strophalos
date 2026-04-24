@@ -345,18 +345,17 @@ def main() -> None:
                         if remaining[fi].path in results:
                             claimed_ep_indices.add(ei)
                     unclaimed_files = [f for f in remaining if f.path not in results]
-                    unclaimed_eps = [
-                        (i, ep) for i, ep in enumerate(window) if i not in claimed_ep_indices
-                    ]
+                    unclaimed_eps = [(i, ep) for i, ep in enumerate(window) if i not in claimed_ep_indices]
                     if len(unclaimed_files) == 1 and len(unclaimed_eps) == 1:
                         f = unclaimed_files[0]
                         _, ep = unclaimed_eps[0]
                         results[f.path] = MatchResult(
-                            file=f, episode=ep, method="elimination", score=0.0,
+                            file=f,
+                            episode=ep,
+                            method="elimination",
+                            score=0.0,
                         )
-                        skipped_weak = [
-                            (n, s) for n, s in skipped_weak if n != f.path.name
-                        ]
+                        skipped_weak = [(n, s) for n, s in skipped_weak if n != f.path.name]
                         print(f"  {f.path.name} → {ep.code} [elimination — sole remaining match]")
 
                     if skipped_weak:
