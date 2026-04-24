@@ -1,4 +1,4 @@
-"""Episode scoring — time-aligned subtitle similarity comparison."""
+"""Episode scoring — subtitle similarity comparison (time-aligned and bag-of-words)."""
 
 from __future__ import annotations
 
@@ -74,14 +74,45 @@ def _jaccard_score(
     return (weighted_sum / total_ref_words) * 10.0
 
 
+def _bag_of_words_score(
+    extracted_cues: list[tuple[float, str]],
+    reference_cues: list[tuple[float, str]],
+) -> float:
+    """Time-independent Jaccard over all words in both cue lists.
+
+    Ignores timestamps entirely — just compares the vocabulary of the two
+    subtitle streams.  Robust to arbitrary timing offsets (DVD vs broadcast,
+    whisper-generated timestamps vs hand-synced SRT).
+    """
+    ext_words: set[str] = set()
+    for _, text in extracted_cues:
+        ext_words.update(tokenize(_normalize_cue(text)))
+    ref_words: set[str] = set()
+    for _, text in reference_cues:
+        ref_words.update(tokenize(_normalize_cue(text)))
+
+    if not ext_words or not ref_words:
+        return 0.0
+
+    intersection = len(ext_words & ref_words)
+    union = len(ext_words | ref_words)
+    return (intersection / union) * 10.0 if union else 0.0
+
+
 def score_subtitle_similarity(
     extracted_cues: list[tuple[float, str]],
     reference_cues: list[tuple[float, str]],
 ) -> float:
     """Score similarity between extracted and reference subtitles.
 
-    Uses time-aligned word-level Jaccard similarity with offset compensation.
-    Tries timing offsets (0, ±5s, ±10s) and returns the best score.
+    Tries two strategies and returns the better score:
+      1. Time-aligned Jaccard (30s buckets, ±10s offset compensation)
+      2. Bag-of-words Jaccard (ignores timing entirely)
+
+    Strategy 1 is more precise when timestamps are close (embedded SRT vs
+    reference SRT).  Strategy 2 handles arbitrary timing mismatches — DVD
+    rips, whisper transcriptions, etc. — where the word overlap is the
+    real signal.
 
     Returns a score where higher = better match. Scaled so a perfect
     match on clean text yields ~10.0.
@@ -89,6 +120,7 @@ def score_subtitle_similarity(
     if not extracted_cues or not reference_cues:
         return 0.0
 
+    # Time-aligned scoring
     bucket_width = 30.0
     ref_buckets = _bucket_cues(reference_cues, bucket_width)
 
@@ -98,5 +130,10 @@ def score_subtitle_similarity(
         score = _jaccard_score(ext_buckets, ref_buckets)
         if score > best_score:
             best_score = score
+
+    # Bag-of-words fallback — dominates when timing is misaligned
+    bow = _bag_of_words_score(extracted_cues, reference_cues)
+    if bow > best_score:
+        best_score = bow
 
     return best_score

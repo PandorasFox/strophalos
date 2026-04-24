@@ -119,6 +119,24 @@ class TestScoreSubtitleSimilarity:
         score_wrong = score_subtitle_similarity(ep1_subs, ep2_ref)
         assert score_correct > score_wrong * 3
 
+    def test_large_timing_offset(self):
+        """DVD/whisper timing can be off by minutes — bag-of-words should still match."""
+        reference = [
+            (10.0, "The merchant caravan arrives at dawn"),
+            (40.0, "Silver coins for your finest wheat"),
+            (70.0, "The northern roads are dangerous this season"),
+        ]
+        # Same dialogue but timestamps shifted by 90 seconds (far beyond ±10s compensation)
+        shifted = [
+            (100.0, "The merchant caravan arrives at dawn"),
+            (130.0, "Silver coins for your finest wheat"),
+            (160.0, "The northern roads are dangerous this season"),
+        ]
+        score = score_subtitle_similarity(shifted, reference)
+        perfect = score_subtitle_similarity(reference, reference)
+        # Bag-of-words should recover the full score despite timing mismatch
+        assert score >= perfect * 0.95
+
     def test_empty_extracted(self):
         ref = [(10.0, "Some text")]
         assert score_subtitle_similarity([], ref) == 0.0

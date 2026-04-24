@@ -192,6 +192,11 @@ def build_double_episode_window(
     double_flags = [f.duration_seconds >= 1.5 * med for f in files]
     if not any(double_flags):
         return None
+    # If every file is flagged, the episode runtime data is probably wrong
+    # (e.g. TMDb reports half the real length).  A genuine double-episode
+    # disc always has at least one normal-length file alongside the double.
+    if all(double_flags):
+        return None
 
     window: list[Episode] = []
     skipped_map: dict[int, Episode] = {}

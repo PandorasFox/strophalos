@@ -22,6 +22,7 @@ def extract_subtitles(mkv_path: Path, duration: float, *, full: bool = False) ->
     tracks = list_subtitle_tracks(mkv_path)
     track = select_best_track(tracks)
     if not track:
+        print(f"    subtitle: no embedded subtitle tracks in {mkv_path.name}, trying whisper")
         return transcribe(mkv_path, duration)
 
     cutoff = duration * 0.25
@@ -92,6 +93,8 @@ def extract_subtitles(mkv_path: Path, duration: float, *, full: bool = False) ->
 
     # If embedded subs yielded nothing, try Whisper
     if not results:
+        print(f"    subtitle: embedded extraction yielded 0 cues for {mkv_path.name}, trying whisper")
         return transcribe(mkv_path, duration)
 
+    print(f"    subtitle: {len(results)} embedded cue(s) from {mkv_path.name}")
     return results

@@ -17,6 +17,10 @@ OPENSUBTITLES_CONFIG = Path("/config/opensubtitles.json")
 OPENSUBTITLES_API_BASE = "https://api.opensubtitles.com/api/v1"
 
 
+class AuthError(Exception):
+    """OpenSubtitles token is expired or invalid — re-run setup-opensubtitles."""
+
+
 def compute_hash(path: Path) -> str | None:
     """Compute the OpenSubtitles hash for a file.
 
@@ -128,17 +132,15 @@ def identify(mkv_files: list[Path]) -> dict[Path, tuple[int, int, str]] | None:
     Returns a mapping from file path to (season, episode, title) for every
     file that was successfully identified. Returns None if the OpenSubtitles
     integration is not configured or entirely unavailable.
-    """
-    from strophalos.core.notify import notify
 
+    Raises AuthError if configured but the token is expired.
+    """
     config = _load_config()
     if config is None:
         return None
 
     if not _token_valid(config):
-        print("  OpenSubtitles: token invalid. Re-run setup-opensubtitles to re-authenticate.")
-        notify("OpenSubtitles token invalid", "Run: docker exec -it strophalos setup-opensubtitles", error=True)
-        return None
+        raise AuthError("OpenSubtitles token invalid. Re-run setup-opensubtitles to re-authenticate.")
 
     print("  OpenSubtitles: attempting hash-based identification...")
     results: dict[Path, tuple[int, int, str]] = {}
@@ -326,6 +328,8 @@ def fetch_reference_subs(
 
     Returns {(season, episode): [(timestamp_seconds, text), ...]} for episodes
     where subtitles were found. Uses a local cache to avoid redundant downloads.
+
+    Raises AuthError if configured but the token is expired.
     """
     from strophalos.identify.subtitles import parse_srt
 
@@ -334,8 +338,7 @@ def fetch_reference_subs(
         return {}
 
     if not _token_valid(config):
-        print("  OpenSubtitles: token invalid, skipping reference subtitle fetch")
-        return {}
+        raise AuthError("OpenSubtitles token invalid. Re-run setup-opensubtitles to re-authenticate.")
 
     cache_index = _load_cache_index()
     results: dict[tuple[int, int], list[tuple[float, str]]] = {}

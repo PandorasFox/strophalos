@@ -309,3 +309,13 @@ class TestBuildDoubleEpisodeWindow:
         files = [RippedFile(path=Path("a.mkv"), duration_seconds=5400)]
         episodes = [Episode(1, 1, "Ep 1", runtime_seconds=0)]
         assert build_double_episode_window(files, episodes) is None
+
+    def test_all_flagged_as_double_returns_none(self):
+        """When all files appear double-length, TMDb runtimes are wrong — bail out.
+
+        The Boondocks case: TMDb reports ~12 min episodes but DVD files are
+        ~22 min each.  1.5 × 12 = 18 → all files flagged as double.
+        """
+        files = [RippedFile(path=Path(f"{i}.mkv"), duration_seconds=1320) for i in range(5)]
+        episodes = self._make_episodes(15, runtime=720)  # wrong: half the real length
+        assert build_double_episode_window(files, episodes) is None

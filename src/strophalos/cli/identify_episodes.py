@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 from strophalos.backends import anidb, opensubtitles
+from strophalos.backends.opensubtitles import AuthError
 from strophalos.backends.tmdb import fetch_all_episodes
 from strophalos.backends.tvdb import supplement_episodes
 from strophalos.core.fs import parse_season_disc, sanitize_filename
@@ -111,7 +112,13 @@ def main() -> None:
     pipeline_notes: list[str] = []
 
     # --- Phase 0: Hash-based identification ---
-    hash_results = opensubtitles.identify(mkv_files)
+    try:
+        hash_results = opensubtitles.identify(mkv_files)
+    except AuthError as exc:
+        msg = f"Identification blocked: {exc}"
+        print(f"  {msg}")
+        notify(f"{series_name}: identification blocked", msg, error=True)
+        return
     if hash_results:
         for path, (season, episode, title) in hash_results.items():
             rf = next((f for f in remaining if f.path == path), None)
@@ -215,7 +222,13 @@ def main() -> None:
                 # Fetch reference subs only if duration doesn't fully solve it
                 reference_subs: dict[tuple[int, int], list[tuple[float, str]]] = {}
                 if need_subs and series_id is not None:
-                    reference_subs = opensubtitles.fetch_reference_subs(episodes, series_id)
+                    try:
+                        reference_subs = opensubtitles.fetch_reference_subs(episodes, series_id)
+                    except AuthError as exc:
+                        msg = f"Identification blocked: {exc}"
+                        print(f"  {msg}")
+                        notify(f"{series_name}: identification blocked", msg, error=True)
+                        return
 
                 if need_subs and reference_subs:
                     pipeline_notes.append("Falling back to subtitle matching")
@@ -324,6 +337,27 @@ def main() -> None:
                             method=method,
                             score=score,
                         )
+
+                    # Elimination: when exactly one file and one window
+                    # episode remain unmatched, the pairing is unambiguous.
+                    claimed_ep_indices: set[int] = set()
+                    for fi, ei, _score in assignments:
+                        if remaining[fi].path in results:
+                            claimed_ep_indices.add(ei)
+                    unclaimed_files = [f for f in remaining if f.path not in results]
+                    unclaimed_eps = [
+                        (i, ep) for i, ep in enumerate(window) if i not in claimed_ep_indices
+                    ]
+                    if len(unclaimed_files) == 1 and len(unclaimed_eps) == 1:
+                        f = unclaimed_files[0]
+                        _, ep = unclaimed_eps[0]
+                        results[f.path] = MatchResult(
+                            file=f, episode=ep, method="elimination", score=0.0,
+                        )
+                        skipped_weak = [
+                            (n, s) for n, s in skipped_weak if n != f.path.name
+                        ]
+                        print(f"  {f.path.name} → {ep.code} [elimination — sole remaining match]")
 
                     if skipped_weak:
                         names = ", ".join(f"{n} ({s:.2f})" for n, s in skipped_weak)

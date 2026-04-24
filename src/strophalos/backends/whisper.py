@@ -11,11 +11,21 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import threading
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
 from strophalos.identify.srt import parse_srt
+
+# Serialize Whisper requests — the container is GPU-bound and can only
+# process one transcription at a time.  Embedded subtitle extraction can
+# still run in parallel; only the Whisper POST is gated.
+_whisper_sem = threading.Semaphore(1)
+
+_RETRY_DELAYS = (10, 30, 90)  # seconds between retries
 
 
 def transcribe(
@@ -35,6 +45,8 @@ def transcribe(
     whisper_url = url or os.environ.get("WHISPER_URL", "")
     if not whisper_url:
         return []
+
+    print(f"    whisper: transcribing {mkv_path.name}")
 
     # Extract audio as WAV (mono 16kHz — what Whisper expects)
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
@@ -56,15 +68,19 @@ def transcribe(
 
     wav = Path(wav_path)
     if not wav.exists() or wav.stat().st_size == 0:
+        print(f"    whisper: ffmpeg produced no output for {mkv_path.name}")
         return []
 
     try:
-        results = _post_asr(whisper_url, wav, language)
+        with _whisper_sem:
+            results = _post_asr(whisper_url, wav, language)
     finally:
         wav.unlink(missing_ok=True)
 
     if results:
-        print(f"    whisper: {len(results)} cue(s) from transcription")
+        print(f"    whisper: {len(results)} cue(s) from {mkv_path.name}")
+    else:
+        print(f"    whisper: no cues returned for {mkv_path.name}")
 
     return results
 
@@ -74,7 +90,10 @@ def _post_asr(
     wav_path: Path,
     language: str,
 ) -> list[tuple[float, str]]:
-    """POST a WAV file to the Whisper ASR endpoint, return parsed SRT cues."""
+    """POST a WAV file to the Whisper ASR endpoint, return parsed SRT cues.
+
+    Retries up to 3 times with exponential backoff on transient errors.
+    """
     endpoint = f"{base_url.rstrip('/')}/asr"
     params = urllib.parse.urlencode({
         "output": "srt",
@@ -102,11 +121,22 @@ def _post_asr(
         method="POST",
     )
 
-    try:
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            srt_text = resp.read().decode("utf-8", errors="replace")
-    except Exception as e:
-        print(f"    whisper: ASR request failed: {e}")
-        return []
+    last_err: Exception | None = None
+    for attempt in range(1 + len(_RETRY_DELAYS)):
+        try:
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                srt_text = resp.read().decode("utf-8", errors="replace")
+            return parse_srt(srt_text)
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last_err = e
+            if attempt < len(_RETRY_DELAYS):
+                delay = _RETRY_DELAYS[attempt]
+                print(f"    whisper: attempt {attempt + 1} failed ({e}), retrying in {delay}s...")
+                time.sleep(delay)
+        except Exception as e:
+            # Non-transient error (e.g. malformed response) — don't retry
+            print(f"    whisper: ASR request failed (not retryable): {e}")
+            return []
 
-    return parse_srt(srt_text)
+    print(f"    whisper: ASR request failed after {1 + len(_RETRY_DELAYS)} attempts: {last_err}")
+    return []
