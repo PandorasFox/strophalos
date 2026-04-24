@@ -14,9 +14,11 @@ from pathlib import Path
 
 from strophalos.core.fs import parse_season_disc, sanitize_filename
 from strophalos.ripper.classify import classify_disc
+from strophalos.ripper.dedup import dedup_segment_variants, filter_bitrate_outliers
 from strophalos.ripper.disc_id import compute_disc_id
+from strophalos.ripper.orchestrate import run_rip, validate_rip
 from strophalos.ripper.result import RipResult
-from strophalos.ripper.rip import TitleRipFailed, rip_titles
+from strophalos.ripper.rip import rip_titles
 from strophalos.ripper.scan import (
     detect_media_type,
     get_title_chapters,
@@ -400,6 +402,17 @@ def rip_video_disc(
     print(f"Disc label: {disc_label}")
     print(f"Found {len(titles)} title(s)")
 
+    titles, dropped = dedup_segment_variants(titles)
+    for dropped_tid, kept_tid in dropped:
+        print(f"  dedup: dropping title {dropped_tid} (segment duplicate of title {kept_tid})")
+
+    titles, low_bitrate = filter_bitrate_outliers(titles)
+    for dropped_tid, br_mbps, median_mbps in low_bitrate:
+        print(
+            f"  bitrate: dropping title {dropped_tid} "
+            f"({br_mbps:.1f} Mbps vs {median_mbps:.1f} Mbps median — likely extra/recap)"
+        )
+
     durations = get_title_durations(titles)
     chapters = get_title_chapters(titles)
     sizes = get_title_sizes(titles)
@@ -491,42 +504,12 @@ def rip_video_disc(
         track_count = _rip_music_bd(drive, out_dir, durations, chapters, to_rip, mb_metadata)
     else:
         print(f"\nRipping {len(to_rip)} title(s) to {out_dir}...")
-        try:
-            rip_titles(drive, to_rip, out_dir)
-        except TitleRipFailed as e:
-            # Unrecoverable title failure (hash/CRC/read error).  The partial
-            # output is useless — a clean re-rip on a re-inserted disc will
-            # want the canonical path free of stale files.
-            print(f"  Disc rip aborted: {e}. Cleaning up {out_dir}.")
-            shutil.rmtree(out_dir, ignore_errors=True)
+        if not run_rip(lambda: rip_titles(drive, to_rip, out_dir), out_dir):
             return None
-        track_count = len(to_rip)
-
-    # Validate ripped files — MakeMKV can exit 0 but write corrupt output
-    # (header reads "This file was not properly finalized").  The stream
-    # data is usually intact; only the first ~48 bytes (reserved header
-    # space) get overwritten.  Try to remux with ffmpeg before giving up.
-    from strophalos.core.mkv import is_valid_mkv, repair_mkv
-
-    ripped_files = sorted(Path(out_dir).glob("*.mkv"))
-    corrupt = [f for f in ripped_files if not is_valid_mkv(f)]
-    if corrupt:
-        still_bad: list[Path] = []
-        for f in corrupt:
-            print(f"  CORRUPT: {f.name} (missing EBML header)")
-            if repair_mkv(f):
-                print(f"  REPAIRED: {f.name}")
-            else:
-                print(f"  UNRECOVERABLE: {f.name} — removing")
-                f.unlink()
-                still_bad.append(f)
-        valid_count = len(ripped_files) - len(still_bad)
-        if valid_count == 0:
-            print(f"  All {len(corrupt)} ripped file(s) are corrupt and unrecoverable — rip failed")
+        valid = validate_rip(out_dir)
+        if valid is None:
             return None
-        if still_bad:
-            print(f"  {valid_count} of {len(ripped_files)} file(s) usable")
-        track_count = valid_count
+        track_count = valid
 
     # Persist disc ID in output directory
     if disc_id:

@@ -10,8 +10,18 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from glob import glob
 from pathlib import Path
+
+from strophalos.ripper.orchestrate import TitleRipFailed
+
+# Per-stage timeouts for one DVD title.  Modern drives rip a single
+# title in a few minutes; 20m for dvdbackup is the "give up, the disc
+# is rotted" threshold (vs the 1h that previously hid stalled rips).
+# mkvmerge is a remux of in-tmpdir VOBs so 5m is plenty.
+_DVDBACKUP_TIMEOUT = 1200
+_MKVMERGE_TIMEOUT = 300
 
 
 def _parse_duration(duration_str: str) -> int:
@@ -78,12 +88,16 @@ def rip_dvd_title(device: str, title_num: int, output_dir: str) -> Path | None:
     with tempfile.TemporaryDirectory(prefix="strophalos-dvd-") as tmpdir:
         # dvdbackup dumps to tmpdir/LABEL/VIDEO_TS/VTS_XX_*.VOB
         print(f"  dvdbackup: title {dvd_title}...", flush=True)
-        result = subprocess.run(
-            ["dvdbackup", "-i", device, "-t", str(dvd_title), "-o", tmpdir],
-            capture_output=True,
-            text=True,
-            timeout=3600,
-        )
+        try:
+            result = subprocess.run(
+                ["dvdbackup", "-i", device, "-t", str(dvd_title), "-o", tmpdir],
+                capture_output=True,
+                text=True,
+                timeout=_DVDBACKUP_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            print(f"  dvdbackup timed out after {_DVDBACKUP_TIMEOUT}s — disc likely unreadable")
+            return None
         if result.returncode != 0:
             print(f"  dvdbackup failed (rc={result.returncode}): {result.stderr.strip()}")
             return None
@@ -130,7 +144,11 @@ def rip_dvd_title(device: str, title_num: int, output_dir: str) -> Path | None:
                     cmd.append("+")
                 cmd.append(vob)
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=_MKVMERGE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            print(f"  mkvmerge timed out after {_MKVMERGE_TIMEOUT}s")
+            return None
         if result.returncode > 1:  # mkvmerge: 0=ok, 1=warnings, 2=error
             print(f"  mkvmerge failed (rc={result.returncode}): {result.stderr.strip()}")
             return None
@@ -138,14 +156,20 @@ def rip_dvd_title(device: str, title_num: int, output_dir: str) -> Path | None:
         return Path(out_mkv)
 
 
-def rip_dvd_titles(device: str, title_ids: list[int], output_dir: str) -> list[Path]:
-    """Rip multiple DVD titles. Returns list of output MKV paths."""
-    results: list[Path] = []
+def rip_dvd_titles(device: str, title_ids: list[int], output_dir: str) -> None:
+    """Rip multiple DVD titles. Raises TitleRipFailed on any title failure
+    so the orchestrator can abort the disc and clean up partial output."""
+    os.makedirs(output_dir, exist_ok=True)
     for i, tid in enumerate(title_ids):
-        print(f"  Ripping title {tid} ({i + 1}/{len(title_ids)})...", flush=True)
+        ts = time.strftime("%H:%M:%S")
+        print(f"  [{ts}] Ripping title {tid} ({i + 1}/{len(title_ids)})...", flush=True)
+        t0 = time.time()
         mkv = rip_dvd_title(device, tid, output_dir)
-        if mkv:
-            results.append(mkv)
-        else:
-            print(f"  WARNING: title {tid} failed")
-    return results
+        elapsed = int(time.time() - t0)
+        h, rem = divmod(elapsed, 3600)
+        m, s = divmod(rem, 60)
+        dur = f"{h}h {m:02d}m {s:02d}s" if h else f"{m}m {s:02d}s"
+        if not mkv:
+            print(f"  [{time.strftime('%H:%M:%S')}] title {tid} failed after {dur}")
+            raise TitleRipFailed(tid)
+        print(f"  [{time.strftime('%H:%M:%S')}] title {tid} done in {dur}", flush=True)

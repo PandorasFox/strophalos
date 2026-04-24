@@ -224,3 +224,146 @@ class TestClassifyDisc:
         disc_type, titles, reason, _meta = classify_disc(durations, {}, "SOME_MOVIE_2020")
         assert disc_type == "movie"
         assert "box-set label" not in reason
+
+
+# ---------------------------------------------------------------------------
+# dedup_segment_variants
+# ---------------------------------------------------------------------------
+
+
+class TestDedupSegmentVariants:
+    def _parse_scan(self, path):
+        """Replay scan.py's TINFO regex over a saved makemkvcon info dump."""
+        import re
+
+        titles: dict[int, dict[int, str]] = {}
+        for ln in open(path).read().splitlines():
+            m = re.match(r'TINFO:(\d+),(\d+),\d+,"(.+)"', ln)
+            if m:
+                tid, attr, val = int(m.group(1)), int(m.group(2)), m.group(3)
+                titles.setdefault(tid, {})[attr] = val
+        return titles
+
+    def test_bsg_s1_d2_collapses_mpls_m2ts_pairs(self):
+        """BSG S1 D2: 5 .mpls episodes + 5 .m2ts duplicates + 2 uniques → 7 keepers."""
+        from pathlib import Path
+
+        from strophalos.ripper.dedup import dedup_segment_variants
+
+        scan_path = Path(__file__).parent / "data" / "bsg_s1_d2_scan.txt"
+        titles = self._parse_scan(scan_path)
+        filtered, dropped = dedup_segment_variants(titles)
+
+        # Keep the .mpls variants (0-4) plus uniques (5, 6).
+        assert set(filtered.keys()) == {0, 1, 2, 3, 4, 5, 6}
+        # Drop the .m2ts raw-stream siblings (7-11).
+        dropped_tids = {d for d, _ in dropped}
+        assert dropped_tids == {7, 8, 9, 10, 11}
+        # Each drop should point at its .mpls counterpart (same segment).
+        drop_map = dict(dropped)
+        assert drop_map[7] == 0  # segment 63
+        assert drop_map[11] == 4  # segment 68
+
+    def test_noop_when_no_segment_map(self):
+        """DVD-style titles (no attr 26) pass through unchanged."""
+        from strophalos.ripper.dedup import dedup_segment_variants
+
+        titles = {0: {9: "0:30:00"}, 1: {9: "0:30:00"}}
+        filtered, dropped = dedup_segment_variants(titles)
+        assert filtered == titles
+        assert dropped == []
+
+    def test_prefers_lowest_tid_when_all_same_type(self):
+        """Two .m2ts titles with the same segment set → keep the lower id."""
+        from strophalos.ripper.dedup import dedup_segment_variants
+
+        titles = {
+            3: {16: "00063.m2ts", 26: "63"},
+            7: {16: "00063.m2ts", 26: "63"},
+        }
+        filtered, dropped = dedup_segment_variants(titles)
+        assert set(filtered.keys()) == {3}
+        assert dropped == [(7, 3)]
+
+    def test_multi_segment_grouping(self):
+        """Segment sets are compared unordered; {13,14} matches {14,13}."""
+        from strophalos.ripper.dedup import dedup_segment_variants
+
+        titles = {
+            0: {16: "00006.mpls", 26: "13,14"},
+            1: {16: "00006.m2ts", 26: "14,13"},
+        }
+        filtered, dropped = dedup_segment_variants(titles)
+        assert set(filtered.keys()) == {0}
+        assert dropped == [(1, 0)]
+
+
+class TestFilterBitrateOutliers:
+    def test_bsg_s1_d2_drops_featurette(self):
+        """BSG T6 (~5 Mbps) should drop against 5 episodes (~23 Mbps)."""
+        import re
+        from pathlib import Path
+
+        from strophalos.ripper.dedup import dedup_segment_variants, filter_bitrate_outliers
+
+        titles: dict[int, dict[int, str]] = {}
+        scan_path = Path(__file__).parent / "data" / "bsg_s1_d2_scan.txt"
+        for ln in open(scan_path).read().splitlines():
+            m = re.match(r'TINFO:(\d+),(\d+),\d+,"(.+)"', ln)
+            if m:
+                tid, attr, val = int(m.group(1)), int(m.group(2)), m.group(3)
+                titles.setdefault(tid, {})[attr] = val
+
+        # Run the full pipeline: segment dedup → bitrate filter.
+        titles, _ = dedup_segment_variants(titles)
+        filtered, dropped = filter_bitrate_outliers(titles)
+
+        # Episodes survive; T5 (low duration but missing size attr path is fine)
+        # and T6 (low bitrate) are evaluated.  T6 must be in the drop set.
+        dropped_tids = {d[0] for d in dropped}
+        assert 6 in dropped_tids, f"expected T6 in drops, got {dropped_tids}"
+        # Episodes 0-4 must be kept.
+        assert {0, 1, 2, 3, 4}.issubset(filtered.keys())
+        # The reported median should be in a sensible BD range (15-30 Mbps).
+        _, _, median_mbps = dropped[0]
+        assert 15.0 <= median_mbps <= 30.0
+
+    def test_noop_when_too_few_titles(self):
+        """Fewer than 3 titles with bitrate data → skip the filter."""
+        from strophalos.ripper.dedup import filter_bitrate_outliers
+
+        titles = {
+            0: {9: "0:45:00", 10: "7.5 GB"},
+            1: {9: "0:10:00", 10: "0.2 GB"},
+        }
+        filtered, dropped = filter_bitrate_outliers(titles)
+        assert filtered == titles
+        assert dropped == []
+
+    def test_keeps_titles_missing_size_or_duration(self):
+        """A title with no size attr can't be judged; keep it."""
+        from strophalos.ripper.dedup import filter_bitrate_outliers
+
+        titles = {
+            0: {9: "0:45:00", 10: "7.5 GB"},
+            1: {9: "0:45:00", 10: "7.5 GB"},
+            2: {9: "0:45:00", 10: "7.5 GB"},
+            3: {9: "0:45:00"},  # no size
+        }
+        filtered, _ = filter_bitrate_outliers(titles)
+        assert 3 in filtered
+
+    def test_drops_clear_outlier(self):
+        """Four 8GB/45min episodes + one 1GB/45min extra → extra drops."""
+        from strophalos.ripper.dedup import filter_bitrate_outliers
+
+        titles = {
+            0: {9: "0:45:00", 10: "8.0 GB"},
+            1: {9: "0:45:00", 10: "8.0 GB"},
+            2: {9: "0:45:00", 10: "8.0 GB"},
+            3: {9: "0:45:00", 10: "8.0 GB"},
+            4: {9: "0:45:00", 10: "1.0 GB"},
+        }
+        filtered, dropped = filter_bitrate_outliers(titles)
+        assert set(filtered.keys()) == {0, 1, 2, 3}
+        assert [d[0] for d in dropped] == [4]

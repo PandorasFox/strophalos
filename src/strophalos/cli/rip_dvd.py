@@ -12,9 +12,11 @@ import argparse
 import json
 import os
 
+from strophalos.core.fs import parse_season_disc, sanitize_filename
 from strophalos.ripper.classify import classify_disc
 from strophalos.ripper.disc_id import compute_dvd_disc_id
 from strophalos.ripper.dvd import rip_dvd_titles, scan_dvd
+from strophalos.ripper.orchestrate import run_rip, validate_rip
 from strophalos.ripper.result import RipResult
 
 
@@ -63,18 +65,39 @@ def rip_dvd_disc(
             label=dir_label,
         )
 
-    content_type = {"tv": "tv", "music": "music"}.get(disc_type, "movies")
-    label_dir = os.path.join(output, content_type, "rips", "dvd", dir_label)
+    # TV box sets (BOONDOCKS_S2_D3, "Mr. Robot: Season Two (Disc 1)", ...) —
+    # pull series/season/disc out of the label and land each disc at
+    # {series}/Season NN/Disc NN.
+    box_set = parse_season_disc(dir_label) if disc_type == "tv" else None
 
-    # Auto-increment disc number
-    disc_num = 1
-    while os.path.exists(os.path.join(label_dir, f"disc{disc_num}")):
-        disc_num += 1
-    out_dir = os.path.join(label_dir, f"disc{disc_num}")
+    if box_set:
+        series_pretty, season_n, disc_n = box_set
+        series_dir = sanitize_filename(series_pretty)
+        label_dir = os.path.join(output, "tv", "rips", "dvd", series_dir, f"Season {season_n:02d}")
+        disc_leaf = f"Disc {disc_n:02d}"
+        out_dir = os.path.join(label_dir, disc_leaf)
+        suffix = 2
+        while os.path.isdir(out_dir) and any(os.scandir(out_dir)):
+            out_dir = os.path.join(label_dir, f"{disc_leaf} ({suffix})")
+            suffix += 1
+        disc_num = disc_n
+    else:
+        content_type = {"tv": "tv", "music": "music"}.get(disc_type, "movies")
+        label_dir = os.path.join(output, content_type, "rips", "dvd", dir_label)
+
+        # Auto-increment disc number
+        disc_num = 1
+        while os.path.exists(os.path.join(label_dir, f"disc{disc_num}")):
+            disc_num += 1
+        out_dir = os.path.join(label_dir, f"disc{disc_num}")
 
     print(f"\nRipping {len(to_rip)} title(s) to {out_dir}...")
-    ripped = rip_dvd_titles(device, to_rip, out_dir)
-    print(f"Ripped {len(ripped)}/{len(to_rip)} title(s)")
+    if not run_rip(lambda: rip_dvd_titles(device, to_rip, out_dir), out_dir):
+        return None
+    valid = validate_rip(out_dir)
+    if valid is None:
+        return None
+    print(f"Ripped {valid}/{len(to_rip)} title(s)")
 
     # Persist disc ID
     if disc_id:
@@ -96,7 +119,7 @@ def rip_dvd_disc(
         output_dir=out_dir,
         disc_type=disc_type,
         media_type="dvd",
-        title_count=len(to_rip),
+        title_count=valid,
         disc_id=disc_id,
         label=dir_label,
     )

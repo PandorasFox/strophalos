@@ -55,9 +55,18 @@ def transcribe(
     try:
         subprocess.run(
             [
-                "ffmpeg", "-y", "-i", str(mkv_path),
-                "-ac", "1", "-ar", "16000",
-                "-vn", "-f", "wav", wav_path,
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(mkv_path),
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-vn",
+                "-f",
+                "wav",
+                wav_path,
             ],
             capture_output=True,
             timeout=300,
@@ -95,12 +104,14 @@ def _post_asr(
     Retries up to 3 times with exponential backoff on transient errors.
     """
     endpoint = f"{base_url.rstrip('/')}/asr"
-    params = urllib.parse.urlencode({
-        "output": "srt",
-        "language": language,
-        "encode": "false",  # already WAV
-        "vad_filter": "true",
-    })
+    params = urllib.parse.urlencode(
+        {
+            "output": "srt",
+            "language": language,
+            "encode": "false",  # already WAV
+            "vad_filter": "true",
+        }
+    )
     url = f"{endpoint}?{params}"
 
     # Build multipart/form-data manually (no requests dependency)
@@ -108,11 +119,15 @@ def _post_asr(
     audio_data = wav_path.read_bytes()
 
     body = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="audio_file"; filename="{wav_path.name}"\r\n'
-        f"Content-Type: audio/wav\r\n"
-        f"\r\n"
-    ).encode() + audio_data + f"\r\n--{boundary}--\r\n".encode()
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="audio_file"; filename="{wav_path.name}"\r\n'
+            f"Content-Type: audio/wav\r\n"
+            f"\r\n"
+        ).encode()
+        + audio_data
+        + f"\r\n--{boundary}--\r\n".encode()
+    )
 
     req = urllib.request.Request(
         url,

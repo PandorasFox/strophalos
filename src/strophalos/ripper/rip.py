@@ -10,22 +10,15 @@ import subprocess
 import time
 from pathlib import Path
 
+from strophalos.ripper.orchestrate import TitleRipFailed
+
+__all__ = ["TitleRipFailed", "rip_titles"]
+
 # makemkvcon MSG lines terminating the save operation carry (saved, failed)
 # counts.  When failed > 0 the process may still exit 0, which is how titles
 # vanish silently on HashCheck / LIBMKV read errors (see S4D2 t01 incident).
 _MSG_SAVE_RESULT = re.compile(r"^MSG:(?:5004|5037),")
 _MSG_ARGS = re.compile(r'"([^"]*)"')
-
-
-class TitleRipFailed(Exception):
-    """A title failed to produce an output file.  MakeMKV's reader does its
-    own retries/error-correction internally, so a reported failure is
-    deterministic — the disc needs cleaning or a different drive.  Callers
-    should abort the whole disc rip and let the orchestrator eject."""
-
-    def __init__(self, tid: int) -> None:
-        super().__init__(f"title {tid} failed")
-        self.tid = tid
 
 
 # How long makemkvcon can go without producing any output before we kill it.
@@ -51,7 +44,7 @@ def rip_titles(
     PROGRESS_INTERVAL = 180  # seconds between progress log lines
 
     for i, tid in enumerate(title_ids):
-        print(f"  Ripping title {tid} ({i + 1}/{len(title_ids)})...", flush=True)
+        print(f"  [{time.strftime('%H:%M:%S')}] Ripping title {tid} ({i + 1}/{len(title_ids)})...", flush=True)
 
         rip_start_wall = time.time()
         cmd = ["makemkvcon"] + opts + ["mkv", f"disc:{drive_id}", str(tid), output_dir]
@@ -160,9 +153,13 @@ def rip_titles(
         produced = [f for f in Path(output_dir).glob(f"*_t{tid:02d}.mkv") if f.stat().st_mtime >= rip_start_wall - 1]
 
         if produced:
+            elapsed = int(time.time() - rip_start_wall)
+            h, rem = divmod(elapsed, 3600)
+            m, s = divmod(rem, 60)
+            dur = f"{h}h {m:02d}m {s:02d}s" if h else f"{m}m {s:02d}s"
             for f in produced:
                 sz_gb = f.stat().st_size / (1024**3)
-                print(f"  title {tid}: wrote {f.name} ({sz_gb:.1f} GB)")
+                print(f"  [{time.strftime('%H:%M:%S')}] title {tid}: wrote {f.name} ({sz_gb:.1f} GB) in {dur}")
             continue
 
         if not failed:
