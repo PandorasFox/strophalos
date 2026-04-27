@@ -4,7 +4,9 @@ Detection order (each step is fast and non-blocking):
 1. cdparanoia -Q — audio CD (instant return on non-audio)
 2. lsdvd — video DVD via libdvdread (handles CSS, no SCSI)
 3. mount + check — Blu-ray (BDMV) or data disc
-4. Unknown fallback
+4. Kernel TOC — catches CD-Extra/mixed-mode where the data track isn't
+   a mountable filesystem (autorun blobs, custom layouts)
+5. Unknown fallback
 
 Nothing here uses SCSI or makemkvcon. DVD detection goes through
 libdvdread which does standard block device reads with CSS decryption.
@@ -17,6 +19,8 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 
+from strophalos.ripper.cdtoc import read_full_toc
+
 
 @dataclass
 class ProbeResult:
@@ -25,6 +29,12 @@ class ProbeResult:
     disc_id: str  # audio CD disc ID, empty if no audio tracks
     has_audio: bool
     has_data: bool
+    # CD-Extra / mixed-mode: when the data session isn't at the device's
+    # nominal sector 0, we need to dd from the data track's LBA. 0 means
+    # "use whole device" (plain data disc, or audio+data where the kernel
+    # exposes the data session at sector 0).
+    data_lba: int = 0
+    data_sectors: int = 0
 
 
 def _check_audio_tracks(device: str) -> bool:
@@ -178,6 +188,38 @@ def probe_disc(device: str) -> ProbeResult:
                     )
             finally:
                 _unmount(mount_point)
+
+        # Mount failed — check the kernel TOC. CD-Extra discs typically have
+        # the data session's ISO9660 PVD at the data track's LBA + 16, not
+        # the device's sector 16, so mount can't find a filesystem. Capture
+        # the TOC-derived sector range so the dd path can read just the
+        # data track.
+        toc = read_full_toc(device)
+        if toc is not None and toc.has_data_track():
+            data = toc.data_track()
+            assert data is not None
+            data_lba = data.offset - 150  # strip MB pregap convention → real LBA
+            # End of data track = next track's LBA, or leadout if it's last.
+            next_offset = toc.leadout
+            for e in toc.entries:
+                if e.track > data.track:
+                    next_offset = e.offset
+                    break
+            data_sectors = (next_offset - 150) - data_lba
+            label = _get_disc_label(device)
+            print(
+                f"  Probe: audio+data disc (data track unmountable, "
+                f"TOC-detected lba={data_lba} sectors={data_sectors}), label='{label}'"
+            )
+            return ProbeResult(
+                disc_type="audio+data",
+                label=label,
+                disc_id=disc_id,
+                has_audio=True,
+                has_data=True,
+                data_lba=data_lba,
+                data_sectors=data_sectors,
+            )
 
         print(f"  Probe: audio CD{f', disc_id={disc_id}' if disc_id else ''}")
         return ProbeResult(disc_type="audio", label="", disc_id=disc_id, has_audio=True, has_data=False)

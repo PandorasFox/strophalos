@@ -7,60 +7,14 @@ whipper output templates, and handles post-rip directory cleanup.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import os
 import re
 import shutil
-import struct
 import subprocess
 from pathlib import Path
 
 from strophalos.core.notify import notify
-
-# Linux CDROM ioctl — reads the full TOC including data tracks. libdiscid's
-# discid.read() omits data tracks for multi-session discs, which produces an
-# audio-only CDTOC that MB will refuse to attach to mixed-mode releases.
-_CDROMREADTOCHDR = 0x5305
-_CDROMREADTOCENTRY = 0x5306
-_CDROM_LEADOUT = 0xAA
-_CDROM_LBA = 0x01
-
-
-def _read_full_toc(device: str) -> tuple[int, int, int, list[tuple[int, bool]]] | None:
-    """Read the full CD TOC from the kernel, including data tracks.
-
-    Returns (first_track, last_track, leadout_offset, [(track_offset, is_data), ...])
-    with offsets in MB's sector convention (LBA + 150 for the 2-second lead-in).
-    Returns None if the device can't be opened or the ioctl fails.
-    """
-    try:
-        fd = os.open(device, os.O_RDONLY | os.O_NONBLOCK)
-    except OSError:
-        return None
-    try:
-        hdr = bytearray(2)
-        fcntl.ioctl(fd, _CDROMREADTOCHDR, hdr, True)
-        first, last = hdr[0], hdr[1]
-
-        def _entry(track_num: int) -> tuple[int, bool]:
-            # struct cdrom_tocentry: track(1) adr_ctrl(1) format(1) pad(1) lba(4) datamode(1) pad(3) = 12
-            buf = bytearray(12)
-            buf[0] = track_num & 0xFF
-            buf[2] = _CDROM_LBA
-            fcntl.ioctl(fd, _CDROMREADTOCENTRY, buf, True)
-            lba = struct.unpack("<i", bytes(buf[4:8]))[0]
-            # Kernel packs bitfield as adr:4 (low nibble) | ctrl:4 (high nibble).
-            # Data-track flag is ctrl & 0x04, i.e. byte & 0x40.
-            is_data = bool(buf[1] & 0x40)
-            return lba + 150, is_data
-
-        tracks = [_entry(t) for t in range(first, last + 1)]
-        leadout, _ = _entry(_CDROM_LEADOUT)
-        return first, last, leadout, tracks
-    except OSError:
-        return None
-    finally:
-        os.close(fd)
+from strophalos.ripper.cdtoc import read_full_toc
 
 
 def _query_disc_info(device: str) -> dict:
@@ -83,16 +37,15 @@ def _query_disc_info(device: str) -> dict:
 
         disc = discid.read(device)
 
-        # Mixed-mode override: if the kernel's full TOC contains a data track,
-        # re-derive the disc ID from all tracks. MB stores mixed-mode CDTOCs
-        # with the data track included, and the attach endpoint won't accept
-        # the audio-only form libdiscid produces by default.
-        toc = _read_full_toc(device)
-        if toc is not None:
-            first, last, leadout, entries = toc
-            if any(is_data for _, is_data in entries):
-                offsets = [off for off, _ in entries]
-                disc = discid.put(first, last, leadout, offsets)
+        # Mixed-mode override (data track at position 1): MB stores these
+        # CDTOCs with the data track included, so re-derive the disc ID from
+        # all tracks. CD-Extra (data at end) follows the standard MB
+        # convention — audio-only disc ID with data tracks attached
+        # separately via the "data tracks at the end" flag — so leave
+        # libdiscid's default behavior alone there.
+        toc = read_full_toc(device)
+        if toc is not None and toc.entries and toc.entries[0].is_data:
+            disc = discid.put(toc.first_track, toc.last_track, toc.leadout, toc.offsets())
 
         info["disc_id"] = disc.id
         info["submission_url"] = disc.submission_url
@@ -157,8 +110,14 @@ def _flatten_multi_disc_dirs(output: Path) -> None:
             pass
 
 
-def rip_audio_cd(device: str, output: str = "/output-cd") -> int:
-    """Core CD rip logic. Returns whipper exit code."""
+def rip_audio_cd(device: str, output: str = "/output-cd") -> tuple[int, str]:
+    """Core CD rip logic. Returns (whipper exit code, output dir).
+
+    On success the second element is the rip's parent output dir (the actual
+    rip lives in an ``{artist} - {title}/`` subdirectory whipper names from
+    its templates). On failure it's the empty string so callers can treat
+    falsy = failure.
+    """
     os.environ["HOME"] = "/config"
 
     print("Querying disc info...")
@@ -179,9 +138,9 @@ def rip_audio_cd(device: str, output: str = "/output-cd") -> int:
         disc_tpl = "%A - %d/%A - %d"
 
     if title:
-        notify("Ripping CD", f"{artist or 'Unknown'} - {title}")
+        notify("Ripping CD", f"{artist or 'Unknown'} - {title}", dedup=False)
     else:
-        notify("Ripping CD", "(unknown disc)")
+        notify("Ripping CD", "(unknown disc)", dedup=False)
 
     # Run whipper (--cdr allows CD-R discs without extra prompting).
     # -R pins the release: whipper's own MB query uses an audio-only disc ID
@@ -233,7 +192,7 @@ def rip_audio_cd(device: str, output: str = "/output-cd") -> int:
         for t in tracks:
             lines.append(f"{t['num']}. {t['title']}")
 
-        notify("CD ripped", "\n".join(lines))
+        notify("CD ripped", "\n".join(lines), dedup=False)
     elif rc != 0:
         # Build the submission/attach URL from discid TOC data
         submission_url = info.get("submission_url", "")
@@ -247,9 +206,9 @@ def rip_audio_cd(device: str, output: str = "/output-cd") -> int:
         msg = f"{artist or 'Unknown'} - {title or 'Unknown'} (exit {rc})"
         if attach_url:
             msg += f"\n\nSubmit/attach TOC:\n{attach_url}"
-        notify("CD rip failed", msg, error=True)
+        notify("CD rip failed", msg, error=True, dedup=False)
 
-    return rc
+    return rc, (output if rc == 0 else "")
 
 
 def main() -> None:
@@ -258,7 +217,7 @@ def main() -> None:
     parser.add_argument("-o", "--output", default="/output-cd", help="Output directory")
     args = parser.parse_args()
 
-    rc = rip_audio_cd(args.device, args.output)
+    rc, _ = rip_audio_cd(args.device, args.output)
     raise SystemExit(rc)
 
 

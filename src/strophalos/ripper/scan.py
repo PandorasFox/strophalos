@@ -92,6 +92,16 @@ def get_title_sizes(titles: dict[int, dict[int, str]]) -> dict[int, int]:
     return sizes
 
 
+def get_title_source_filenames(titles: dict[int, dict[int, str]]) -> dict[int, str]:
+    """Extract title ID -> source filename (e.g. '00000.mpls'). Attribute 16."""
+    return {tid: attrs[16] for tid, attrs in titles.items() if 16 in attrs}
+
+
+def get_title_segment_maps(titles: dict[int, dict[int, str]]) -> dict[int, str]:
+    """Extract title ID -> raw segment map (e.g. '63' or '13,14'). Attribute 26."""
+    return {tid: attrs[26] for tid, attrs in titles.items() if 26 in attrs}
+
+
 def detect_media_type(disc_info: dict[int, str]) -> str:
     """Detect physical media type: 'dvd', 'bd', or 'uhd'.
 

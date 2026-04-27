@@ -19,6 +19,7 @@ for DVDs — no special-casing needed at the call site.
 
 from __future__ import annotations
 
+from strophalos.ripper.cluster import episode_duration_cluster
 from strophalos.ripper.scan import get_title_durations, get_title_sizes
 
 # TINFO attribute IDs used here
@@ -89,7 +90,7 @@ def filter_bitrate_outliers(
     min_ratio: float = 0.5,
     min_titles: int = 3,
 ) -> tuple[dict[int, dict[int, str]], list[tuple[int, float, float]]]:
-    """Drop titles whose encoding bitrate is far below the median.
+    """Drop titles whose encoding bitrate is far below the episode median.
 
     Episodes on one disc share an encoder pass and come out at similar
     bitrates (variance within ~20%).  Featurettes, "previously on" reels,
@@ -97,11 +98,13 @@ def filter_bitrate_outliers(
     less), so a single ratio threshold separates them cleanly from the
     episode cluster without needing k-means.
 
-    Any title with both attr 10 (size) and attr 9 (duration) contributes
-    to the median; titles missing either are kept as-is (we can't judge
-    them, so default to inclusion).  When fewer than `min_titles` have a
-    computable bitrate the filter no-ops — medians off small samples are
-    noise.
+    The duration cluster comes from `episode_duration_cluster` — the same
+    rule used by classify, so a featurette that classify picks up as an
+    episode is guaranteed to be evaluated here too.  Only cluster members
+    can be dropped; short non-cluster titles pass through because
+    duration-based classification already handles them.  When the cluster
+    has fewer than `min_titles` the filter no-ops — medians off small
+    samples are noise.
 
     Returns (filtered, dropped) where `dropped` is
     `(tid, bitrate_mbps, median_mbps)` tuples for logging.
@@ -116,21 +119,26 @@ def filter_bitrate_outliers(
         if size and dur and dur > 0:
             bitrates[tid] = size / dur  # bytes/sec
 
-    if len(bitrates) < min_titles:
+    if not durations:
         return titles, []
 
-    sorted_br = sorted(bitrates.values())
+    cluster_tids_all, _ = episode_duration_cluster(durations)
+    # Cluster members must also have computable bitrate.
+    cluster_tids = [tid for tid in cluster_tids_all if tid in bitrates]
+
+    if len(cluster_tids) < min_titles:
+        return titles, []
+
+    sorted_br = sorted(bitrates[tid] for tid in cluster_tids)
     median = sorted_br[len(sorted_br) // 2]
     threshold = median * min_ratio
 
     dropped: list[tuple[int, float, float]] = []
-    keepers: set[int] = set()
-    for tid in titles:
-        br = bitrates.get(tid)
-        if br is None or br >= threshold:
-            keepers.add(tid)
-        else:
-            # Report in Mbps for humans — /125000 = /(1024*1024/8) approx.
+    keepers: set[int] = set(titles.keys())
+    for tid in cluster_tids:
+        br = bitrates[tid]
+        if br < threshold:
+            keepers.discard(tid)
             dropped.append((tid, br * 8 / 1_000_000, median * 8 / 1_000_000))
 
     filtered = {tid: attrs for tid, attrs in titles.items() if tid in keepers}

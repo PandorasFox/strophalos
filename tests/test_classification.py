@@ -108,7 +108,7 @@ class TestScoreTV:
             meaningful=sorted_titles,
         )
         assert score == 0.0
-        assert "too few" in reason
+        assert "no episode duration cluster" in reason
 
     def test_very_uniform_episodes(self):
         """8 episodes all exactly the same length → very high uniformity bonus."""
@@ -367,3 +367,58 @@ class TestFilterBitrateOutliers:
         filtered, dropped = filter_bitrate_outliers(titles)
         assert set(filtered.keys()) == {0, 1, 2, 3}
         assert [d[0] for d in dropped] == [4]
+
+    def test_double_length_finale_doesnt_hide_featurette(self):
+        """BSG S2D5 t7 regression: a double-length finale must not push the
+        cluster anchor so high that an episode-length low-bitrate featurette
+        falls below 0.5× and escapes evaluation."""
+        from strophalos.ripper.dedup import filter_bitrate_outliers
+
+        titles = {
+            # 2 regular episodes ~43 min, ~10.8 GB (~33 Mbps)
+            0: {9: "0:43:21", 10: "10.8 GB"},
+            1: {9: "0:43:45", 10: "10.9 GB"},
+            # Double-length finale 68 min, 17 GB — same bitrate, wider runtime.
+            2: {9: "1:07:54", 10: "17.0 GB"},
+            # 28-min featurette at ~5 Mbps — must drop. Lives between
+            # 0.5× and 2.0× of the *median* episode duration (43m) but is
+            # below 0.5× the max (68m).
+            7: {9: "0:27:37", 10: "1.0 GB"},
+            # Short menu/stinger noise, excluded by the 600s floor.
+            12: {9: "0:02:51", 10: "0.1 GB"},
+            13: {9: "0:02:27", 10: "0.1 GB"},
+        }
+        filtered, dropped = filter_bitrate_outliers(titles)
+        dropped_tids = {d[0] for d in dropped}
+        assert 7 in dropped_tids, f"t7 featurette must drop, got {dropped_tids}"
+        assert {0, 1, 2}.issubset(filtered.keys())
+        assert {12, 13}.issubset(filtered.keys())
+
+    def test_short_low_bitrate_noise_doesnt_hide_featurette(self):
+        """BSG S2D2 t10 regression: episode-length featurette at low bitrate
+        must still drop even when the disc has several short low-bitrate
+        titles that would skew a naive all-titles median downward."""
+        from strophalos.ripper.dedup import filter_bitrate_outliers
+
+        titles = {
+            # 5 real episodes: ~23 Mbps
+            0: {9: "0:45:00", 10: "7.5 GB"},
+            1: {9: "0:45:00", 10: "7.5 GB"},
+            2: {9: "0:45:00", 10: "7.5 GB"},
+            3: {9: "0:45:00", 10: "7.5 GB"},
+            4: {9: "0:45:00", 10: "7.5 GB"},
+            # Episode-duration featurette at ~3 Mbps — must drop.
+            10: {9: "0:45:00", 10: "1.0 GB"},
+            # Short low-bitrate menu/stinger noise — must NOT drag median down.
+            20: {9: "0:01:00", 10: "0.05 GB"},
+            21: {9: "0:02:00", 10: "0.08 GB"},
+            22: {9: "0:00:30", 10: "0.02 GB"},
+            23: {9: "0:01:30", 10: "0.04 GB"},
+        }
+        filtered, dropped = filter_bitrate_outliers(titles)
+        dropped_tids = {d[0] for d in dropped}
+        assert 10 in dropped_tids, f"t10 featurette must drop, got {dropped_tids}"
+        # Short non-cluster titles pass through — duration-based classification
+        # handles them; we don't want this filter to double up on that job.
+        assert {20, 21, 22, 23}.issubset(filtered.keys())
+        assert {0, 1, 2, 3, 4}.issubset(filtered.keys())

@@ -227,20 +227,43 @@ class Orchestrator:
         from strophalos.cli.rip_cd import rip_audio_cd
 
         _log("audio CD — handing off to whipper")
-        rc = rip_audio_cd(self.device)
+        rc, out_dir = rip_audio_cd(self.device)
         if rc != 0:
             _log(f"CD rip failed (rc={rc})")
-        return None  # Audio CDs don't go through identification
+            return None
+        return RipResult(
+            output_dir=out_dir,
+            disc_type="music",
+            media_type="cd",
+            title_count=0,
+            disc_id=probe.disc_id or None,
+        )
 
     def _rip_audio_data(self, probe: ProbeResult) -> RipResult | None:
         from strophalos.cli.rip_cd import rip_audio_cd
         from strophalos.cli.rip_data import rip_data_disc
 
         _log("audio+data disc — ripping ISO + audio tracks")
-        notify("Ripping audio+data disc", probe.label, dedup=False)
-        rip_data_disc(self.device, probe.label, str(self.archive_root) + "/iso", dry_run=False)
-        rip_audio_cd(self.device)
-        return None  # No identification for audio+data
+        notify("Ripping audio+data disc", probe.label or "(unknown)", dedup=False)
+        rip_data_disc(
+            self.device,
+            probe.label,
+            str(self.archive_root) + "/iso",
+            dry_run=False,
+            skip_sectors=probe.data_lba,
+            count_sectors=probe.data_sectors,
+        )
+        rc, out_dir = rip_audio_cd(self.device)
+        if rc != 0:
+            return None
+        return RipResult(
+            output_dir=out_dir,
+            disc_type="music",
+            media_type="cd",
+            title_count=0,
+            disc_id=probe.disc_id or None,
+            label=probe.label,
+        )
 
     def _chown_output(self, path: Path) -> None:
         """Recursively chown output directory to PUID:PGID."""

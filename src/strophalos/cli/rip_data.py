@@ -29,14 +29,35 @@ def rip_data_disc(
     label: str | None = None,
     output: str = "/media/archive/iso",
     dry_run: bool = False,
+    skip_sectors: int = 0,
+    count_sectors: int = 0,
 ) -> RipResult | None:
-    """Core data disc rip logic. Returns structured result or None on failure."""
+    """Core data disc rip logic. Returns structured result or None on failure.
+
+    For CD-Extra / mixed-mode discs the data session's ISO9660 records use
+    *absolute disc LBAs* (e.g. root dir at LBA 171650 on a disc where the
+    data session starts at 171631), so a plain skip-extracted ISO won't
+    mount — its internal pointers reference sectors past EOF. To produce a
+    mountable image we sparse-pad the front: write the data session's bytes
+    at file offset ``skip_sectors * 2048``, leaving a hole before it. The
+    result mounts with ``-o sbsector={skip_sectors}`` and is small on disk
+    (sparse) but reads as ``(skip+count) * 2048`` bytes.
+
+    Pass ``skip_sectors=0`` for plain data discs to keep the original
+    whole-device dd behavior.
+    """
     dir_label = label or "unknown_disc"
     safe_label = dir_label.replace("/", "_").replace(" ", "_")
 
-    disc_size = _get_disc_size(device)
-    size_mb = disc_size / (1024**2) if disc_size else 0
-    print(f"Data disc: {dir_label} ({size_mb:.0f} MB)")
+    if count_sectors > 0:
+        size_mb = count_sectors * 2048 / (1024**2)
+        print(
+            f"Data session: {dir_label} ({size_mb:.0f} MB, lba={skip_sectors} sectors={count_sectors}, sparse-padded)"
+        )
+    else:
+        disc_size = _get_disc_size(device)
+        size_mb = disc_size / (1024**2) if disc_size else 0
+        print(f"Data disc: {dir_label} ({size_mb:.0f} MB)")
 
     os.makedirs(output, exist_ok=True)
 
@@ -58,16 +79,20 @@ def rip_data_disc(
         )
 
     print(f"Ripping to {out_path}...")
-    notify("Ripping data disc", f"{dir_label} ({size_mb:.0f} MB)")
+    notify("Ripping data disc", f"{dir_label} ({size_mb:.0f} MB)", dedup=False)
 
-    result = subprocess.run(
-        ["dd", f"if={device}", f"of={out_path}", "bs=2048", "status=progress"],
-        timeout=7200,
-    )
+    dd_cmd = ["dd", f"if={device}", f"of={out_path}", "bs=2048", "status=progress"]
+    if skip_sectors > 0:
+        # Sparse-pad: read from disc LBA `skip_sectors`, write at file offset
+        # `skip_sectors * 2048`. dd's seek= leaves a hole on a sparse-capable FS.
+        dd_cmd += [f"skip={skip_sectors}", f"seek={skip_sectors}", "conv=sparse"]
+    if count_sectors > 0:
+        dd_cmd.append(f"count={count_sectors}")
+    result = subprocess.run(dd_cmd, timeout=7200)
 
     if result.returncode != 0:
         print(f"dd failed (rc={result.returncode})")
-        notify("Data disc rip failed", f"{dir_label} (exit {result.returncode})", error=True)
+        notify("Data disc rip failed", f"{dir_label} (exit {result.returncode})", error=True, dedup=False)
         try:
             os.unlink(out_path)
         except OSError:
@@ -76,7 +101,20 @@ def rip_data_disc(
 
     final_size = os.path.getsize(out_path) / (1024**2)
     print(f"Done: {out_path} ({final_size:.0f} MB)")
-    notify("Data disc ripped", f"{dir_label}\n{final_size:.0f} MB → {out_path}")
+
+    # CD-Extra: drop a sidecar with the mount hint. Mountable as
+    # `mount -t iso9660 -o loop,ro,sbsector=<N> file.iso`.
+    if skip_sectors > 0:
+        sidecar = out_path + ".mount-info"
+        with open(sidecar, "w") as f:
+            f.write("# CD-Extra data session ripped with absolute-LBA layout.\n")
+            f.write(f"sbsector={skip_sectors}\n")
+            f.write(f"data_track_lba={skip_sectors}\n")
+            f.write(f"data_track_sectors={count_sectors}\n")
+            f.write("# To mount on Linux:\n")
+            f.write(f"#   mount -t iso9660 -o loop,ro,sbsector={skip_sectors} {os.path.basename(out_path)} /mnt/...\n")
+
+    notify("Data disc ripped", f"{dir_label}\n{final_size:.0f} MB → {out_path}", dedup=False)
 
     return RipResult(
         output_dir=output,

@@ -17,13 +17,24 @@ from strophalos.ripper.classify import classify_disc
 from strophalos.ripper.dedup import dedup_segment_variants, filter_bitrate_outliers
 from strophalos.ripper.disc_id import compute_disc_id
 from strophalos.ripper.orchestrate import run_rip, validate_rip
+from strophalos.ripper.plan import (
+    ClassificationRecord,
+    PlanBlock,
+    build_plan,
+    build_title_records,
+    find_plan_by_disc_id,
+    plan_path,
+    write_plan,
+)
 from strophalos.ripper.result import RipResult
 from strophalos.ripper.rip import rip_titles
 from strophalos.ripper.scan import (
     detect_media_type,
     get_title_chapters,
     get_title_durations,
+    get_title_segment_maps,
     get_title_sizes,
+    get_title_source_filenames,
     scan_disc,
 )
 
@@ -398,13 +409,16 @@ def rip_video_disc(
 ) -> RipResult | None:
     """Core rip-video logic. Returns structured result or None on failure."""
     print(f"Scanning disc in drive {drive}...")
-    disc_label, titles, disc_info = scan_disc(drive)
+    disc_label, all_titles, disc_info = scan_disc(drive)
     print(f"Disc label: {disc_label}")
-    print(f"Found {len(titles)} title(s)")
+    print(f"Found {len(all_titles)} title(s)")
 
-    titles, dropped = dedup_segment_variants(titles)
+    dropped_reasons: dict[int, str] = {}
+
+    titles, dropped = dedup_segment_variants(all_titles)
     for dropped_tid, kept_tid in dropped:
         print(f"  dedup: dropping title {dropped_tid} (segment duplicate of title {kept_tid})")
+        dropped_reasons[dropped_tid] = f"segment-duplicate-of-{kept_tid}"
 
     titles, low_bitrate = filter_bitrate_outliers(titles)
     for dropped_tid, br_mbps, median_mbps in low_bitrate:
@@ -412,6 +426,7 @@ def rip_video_disc(
             f"  bitrate: dropping title {dropped_tid} "
             f"({br_mbps:.1f} Mbps vs {median_mbps:.1f} Mbps median — likely extra/recap)"
         )
+        dropped_reasons[dropped_tid] = f"low-bitrate-{br_mbps:.1f}Mbps-vs-{median_mbps:.1f}Mbps"
 
     durations = get_title_durations(titles)
     chapters = get_title_chapters(titles)
@@ -440,53 +455,122 @@ def rip_video_disc(
     device = os.environ.get("DEVICE", "/dev/sr1")
     disc_id = compute_disc_id(media_type, device)
 
+    # Walk archive for an existing plan with this disc_id.  If found with
+    # manual_override=true, rip into that directory with the edited title
+    # list; otherwise fall through and compute a fresh out_dir below.
+    override_dir: str | None = None
+    existing_plan = find_plan_by_disc_id(output, disc_id) if disc_id else None
+    if existing_plan and existing_plan[1].plan.manual_override:
+        override_dir, prev_plan = existing_plan[0], existing_plan[1]
+        override_dir = str(override_dir)
+        disc_type = prev_plan.plan.disc_type
+        to_rip = list(prev_plan.plan.titles_to_rip)
+        print(f"\nManual override: ripping {to_rip} (disc_type={disc_type})  [from {override_dir}]")
+
+    dir_label = label or disc_label or "unknown_disc"
+
+    if override_dir:
+        out_dir = override_dir
+        disc_num = 1
+    else:
+        # TV box sets (Mr. Robot: Season Two (Disc 1), MRROBOT_S1D1_NA, ...) — pull
+        # the series/season/disc out of the label and build a hierarchical path so
+        # each disc lands at {series}/Season NN/Disc NN.  Prefer the pretty title
+        # from MakeMKV since its prefix is already human-readable.
+        box_set = None
+        if disc_type == "tv":
+            box_set = parse_season_disc(disc_label or "") or parse_season_disc(label or "")
+
+        # Music BDs go to a separate output path (like audio CDs go to /output-cd)
+        if disc_type == "music":
+            label_dir = os.path.join(output_bd_audio, dir_label)
+            disc_num = 1
+            while os.path.exists(os.path.join(label_dir, f"disc{disc_num}")):
+                disc_num += 1
+            out_dir = os.path.join(label_dir, f"disc{disc_num}")
+        elif box_set:
+            series_pretty, season_n, disc_n = box_set
+            series_dir = sanitize_filename(series_pretty)
+            label_dir = os.path.join(output, "tv", "rips", media_type, series_dir, f"Season {season_n:02d}")
+            disc_leaf = f"Disc {disc_n:02d}"
+            out_dir = os.path.join(label_dir, disc_leaf)
+            # Re-rip collision: only bump if the target already has content.
+            suffix = 2
+            while os.path.isdir(out_dir) and any(os.scandir(out_dir)):
+                out_dir = os.path.join(label_dir, f"{disc_leaf} ({suffix})")
+                suffix += 1
+            disc_num = disc_n
+        else:
+            content_type = {"tv": "tv"}.get(disc_type, "movies")
+            label_dir = os.path.join(output, content_type, "rips", media_type, dir_label)
+            disc_num = 1
+            while os.path.exists(os.path.join(label_dir, f"disc{disc_num}")):
+                disc_num += 1
+            out_dir = os.path.join(label_dir, f"disc{disc_num}")
+
+    # Build and persist the rip plan alongside the output.  On a plain dry
+    # run this creates the prospective out_dir with just the plan inside —
+    # user edits, reinserts, and the real rip follows.
+    if disc_id:
+        id_type = "dvd_crc64" if media_type == "dvd" else "bd_sha256"
+        title_records = build_title_records(
+            durations=get_title_durations(all_titles),
+            chapters=get_title_chapters(all_titles),
+            sizes=get_title_sizes(all_titles),
+            source_filenames=get_title_source_filenames(all_titles),
+            segment_maps=get_title_segment_maps(all_titles),
+            dropped=dropped_reasons,
+        )
+        classification = ClassificationRecord(
+            disc_type=disc_type,
+            reason=reason,
+            suggested_titles_to_rip=list(to_rip),
+        )
+        if override_dir and existing_plan:
+            plan_block = existing_plan[1].plan
+        else:
+            plan_block = PlanBlock(
+                disc_type=disc_type,
+                titles_to_rip=list(to_rip),
+                manual_override=False,
+            )
+        plan = build_plan(
+            disc_id=disc_id,
+            id_type=id_type,
+            disc_label=disc_label,
+            media_type=media_type,
+            titles=title_records,
+            classification=classification,
+            plan_block=plan_block,
+        )
+        write_plan(out_dir, plan)
+        print(f"  Plan: {plan_path(out_dir)}")
+    else:
+        print("  Plan: skipped (no disc_id)")
+
     if dry_run:
         print("\n[dry-run] Would rip the above titles.")
+        if disc_id and not (existing_plan and existing_plan[1].plan.manual_override):
+            print(
+                f"  Edit {plan_path(out_dir)} "
+                "(set manual_override=true and adjust titles_to_rip) and re-rip to override."
+            )
         return RipResult(
-            output_dir="",
+            output_dir=out_dir,
             disc_type=disc_type,
             media_type=media_type,
             title_count=len(to_rip),
             disc_id=disc_id,
-            label=label or disc_label or "unknown_disc",
+            label=dir_label,
         )
 
-    dir_label = label or disc_label or "unknown_disc"
-
-    # TV box sets (Mr. Robot: Season Two (Disc 1), MRROBOT_S1D1_NA, ...) — pull
-    # the series/season/disc out of the label and build a hierarchical path so
-    # each disc lands at {series}/Season NN/Disc NN.  Prefer the pretty title
-    # from MakeMKV since its prefix is already human-readable.
-    box_set = None
-    if disc_type == "tv":
-        box_set = parse_season_disc(disc_label or "") or parse_season_disc(label or "")
-
-    # Music BDs go to a separate output path (like audio CDs go to /output-cd)
-    if disc_type == "music":
-        label_dir = os.path.join(output_bd_audio, dir_label)
-        disc_num = 1
-        while os.path.exists(os.path.join(label_dir, f"disc{disc_num}")):
-            disc_num += 1
-        out_dir = os.path.join(label_dir, f"disc{disc_num}")
-    elif box_set:
-        series_pretty, season_n, disc_n = box_set
-        series_dir = sanitize_filename(series_pretty)
-        label_dir = os.path.join(output, "tv", "rips", media_type, series_dir, f"Season {season_n:02d}")
-        disc_leaf = f"Disc {disc_n:02d}"
-        out_dir = os.path.join(label_dir, disc_leaf)
-        # Re-rip collision: only bump if the target already has content.
-        suffix = 2
-        while os.path.isdir(out_dir) and any(os.scandir(out_dir)):
-            out_dir = os.path.join(label_dir, f"{disc_leaf} ({suffix})")
-            suffix += 1
-        disc_num = disc_n
-    else:
-        content_type = {"tv": "tv"}.get(disc_type, "movies")
-        label_dir = os.path.join(output, content_type, "rips", media_type, dir_label)
-        disc_num = 1
-        while os.path.exists(os.path.join(label_dir, f"disc{disc_num}")):
-            disc_num += 1
-        out_dir = os.path.join(label_dir, f"disc{disc_num}")
+    # Override re-rip into an existing dir: wipe old MKVs so stale titles
+    # from the previous classifier attempt don't linger.  Plan + disc-id are
+    # preserved.
+    if override_dir:
+        for entry in os.scandir(out_dir):
+            if entry.is_file() and entry.name.endswith(".mkv"):
+                os.unlink(entry.path)
 
     # Music BD: special chapter-split rip flow
     if disc_type == "music" and mb_metadata:
@@ -546,7 +630,7 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Scan and classify only")
     args = parser.parse_args()
 
-    result = rip_video_disc(args.drive, args.label, args.output, args.dry_run)
+    result = rip_video_disc(args.drive, args.label, args.output, dry_run=args.dry_run)
 
     if result and not args.dry_run:
         # STROPHALOS_* output protocol — backward compatibility

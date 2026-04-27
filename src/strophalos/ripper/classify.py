@@ -5,6 +5,7 @@ from __future__ import annotations
 from strophalos.backends.musicbrainz import score_musicbrainz
 from strophalos.backends.tmdb import score_title_search
 from strophalos.core.fs import parse_season_disc
+from strophalos.ripper.cluster import EPISODE_BAND_HIGH, EPISODE_BAND_LOW, episode_duration_cluster
 
 
 def _score_movie(
@@ -64,19 +65,15 @@ def _score_tv(
     score = 0.0
     reasons: list[str] = []
 
-    rest_meaningful = [(tid, dur) for tid, dur in meaningful if tid != longest_tid]
-    episode_candidates = [(tid, dur) for tid, dur in rest_meaningful if dur >= 600]
+    # Exclude the longest title from median computation so a play-all
+    # doesn't skew the anchor; it's re-considered for rip selection below.
+    rest_meaningful = {tid: dur for tid, dur in meaningful if tid != longest_tid}
+    cluster_tids, median_dur = episode_duration_cluster(rest_meaningful)
 
-    if len(episode_candidates) < 2:
-        return 0.0, [], "too few episode candidates"
+    if len(cluster_tids) < 2:
+        return 0.0, [], "no episode duration cluster"
 
-    ep_durs = [dur for _, dur in episode_candidates]
-    median_dur = sorted(ep_durs)[len(ep_durs) // 2]
-
-    in_cluster = [(tid, dur) for tid, dur in episode_candidates if median_dur * 0.5 <= dur <= median_dur * 2.0]
-
-    if len(in_cluster) < 2:
-        return 0.0, [], "no duration cluster"
+    in_cluster = [(tid, rest_meaningful[tid]) for tid in cluster_tids]
 
     # Episode uniformity — low coefficient of variation means consistent lengths
     cluster_durs = [dur for _, dur in in_cluster]
@@ -88,7 +85,7 @@ def _score_tv(
     # Computed upfront so the reason reports the actual rip count rather than
     # the cluster count (which excludes the longest title to detect play-all).
     titles_to_rip = [tid for tid, _ in in_cluster]
-    if median_dur * 0.5 <= longest_dur <= median_dur * 2.0:
+    if median_dur * EPISODE_BAND_LOW <= longest_dur <= median_dur * EPISODE_BAND_HIGH:
         if longest_tid not in titles_to_rip:
             titles_to_rip.append(longest_tid)
     rip_count = len(titles_to_rip)
