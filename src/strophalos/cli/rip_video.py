@@ -448,6 +448,26 @@ def rip_video_disc(
     print(f"Reason: {reason}")
     print(f"Titles to rip: {to_rip}")
 
+    # Preserve the classifier's verdict before any env/override mutation — the
+    # plan's classification block must report what the classifier actually
+    # decided so ID-side consumers can recover the main title even when we
+    # rip all titles for extras.
+    classifier_disc_type = disc_type
+    classifier_suggested = list(to_rip)
+
+    # STROPHALOS_RIP_ALL_TITLES=1 — force ripping every scanned title and
+    # bypass the music-BD chapter-split flow.  Plan's manual_override (below)
+    # still wins so per-disc edits stay authoritative.
+    rip_all_env = os.environ.get("STROPHALOS_RIP_ALL_TITLES", "").strip().lower() in ("1", "true", "yes")
+    if rip_all_env:
+        all_tids = sorted(durations.keys())
+        print(f"\nSTROPHALOS_RIP_ALL_TITLES=1: overriding to {len(all_tids)} title(s): {all_tids}")
+        to_rip = all_tids
+        # Keep disc_type so the output landing path stays sensible (music
+        # BDs still go to output_bd_audio), but clear mb_metadata so the
+        # music-BD chapter-split flow is bypassed and titles rip raw.
+        mb_metadata = None
+
     media_type = detect_media_type(disc_info)
     print(f"Media type: {media_type}")
 
@@ -455,11 +475,14 @@ def rip_video_disc(
     device = os.environ.get("DEVICE", "/dev/sr1")
     disc_id = compute_disc_id(media_type, device)
 
-    # Walk archive for an existing plan with this disc_id.  If found with
-    # manual_override=true, rip into that directory with the edited title
-    # list; otherwise fall through and compute a fresh out_dir below.
+    # Walk archive for an existing plan with this disc_id.  Music BDs land
+    # under output_bd_audio, not the main archive, so search both roots
+    # — otherwise an edited plan for a music disc gets missed and the
+    # re-rip lands in disc2 with the classifier's original pick.
+    # If found with manual_override=true, rip into that directory with the
+    # edited title list; otherwise fall through and compute a fresh out_dir.
     override_dir: str | None = None
-    existing_plan = find_plan_by_disc_id(output, disc_id) if disc_id else None
+    existing_plan = find_plan_by_disc_id([output, output_bd_audio], disc_id) if disc_id else None
     if existing_plan and existing_plan[1].plan.manual_override:
         override_dir, prev_plan = existing_plan[0], existing_plan[1]
         override_dir = str(override_dir)
@@ -522,9 +545,9 @@ def rip_video_disc(
             dropped=dropped_reasons,
         )
         classification = ClassificationRecord(
-            disc_type=disc_type,
+            disc_type=classifier_disc_type,
             reason=reason,
-            suggested_titles_to_rip=list(to_rip),
+            suggested_titles_to_rip=classifier_suggested,
         )
         if override_dir and existing_plan:
             plan_block = existing_plan[1].plan
@@ -533,6 +556,7 @@ def rip_video_disc(
                 disc_type=disc_type,
                 titles_to_rip=list(to_rip),
                 manual_override=False,
+                forced_rip_all=rip_all_env,
             )
         plan = build_plan(
             disc_id=disc_id,

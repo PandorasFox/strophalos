@@ -13,6 +13,7 @@ from strophalos.core.fs import sanitize_filename
 from strophalos.core.mkv import get_mkv_duration
 from strophalos.core.notify import notify
 from strophalos.daemon.manifest import settle_identify, write_conflict
+from strophalos.ripper.plan import read_plan
 
 
 def main() -> None:
@@ -37,12 +38,46 @@ def main() -> None:
 
     print(f"Found {len(mkv_files)} MKV file(s)")
 
-    # Find the main feature (largest file)
-    main_feature = max(mkv_files, key=lambda p: p.stat().st_size)
+    # Plan-aware main-feature selection: when the disc was ripped with
+    # STROPHALOS_RIP_ALL_TITLES (or a manual override that pulled in extras),
+    # the largest file isn't reliably the main feature.  The classifier's
+    # own main-title pick lives in the rip plan — prefer that, fall back to
+    # largest when no plan exists or the suggested title isn't on disk.
+    plan = read_plan(disc_dir)
+    main_feature: Path | None = None
+    plan_note = ""
+    if plan is not None:
+        cls = plan.classification
+        pl = plan.plan
+        if cls.disc_type == "movie" and len(cls.suggested_titles_to_rip) == 1:
+            main_tid = cls.suggested_titles_to_rip[0]
+            suffix = f"_t{main_tid:02d}.mkv"
+            for f in mkv_files:
+                if f.name.endswith(suffix):
+                    main_feature = f
+                    plan_note = f" [plan: classifier main title {main_tid}]"
+                    break
+            if main_feature is None:
+                print(
+                    f"  Plan suggests title {main_tid} as main feature but no "
+                    f"matching MKV (*_t{main_tid:02d}.mkv) on disk; falling back to largest"
+                )
+        elif cls.disc_type != "movie":
+            # Classifier disagreed with the rip target (e.g. TV/music ripped
+            # via override).  Note it but keep going — caller invoked
+            # identify-movie deliberately.
+            plan_note = f" [plan classifier said: {cls.disc_type}]"
+        if pl.forced_rip_all:
+            plan_note += " [forced rip-all]"
+        elif pl.manual_override:
+            plan_note += " [manual override]"
+    if main_feature is None:
+        main_feature = max(mkv_files, key=lambda p: p.stat().st_size)
+
     main_size_gb = main_feature.stat().st_size / (1024**3)
     extras = [f for f in mkv_files if f != main_feature]
 
-    print(f"  Main feature: {main_feature.name} ({main_size_gb:.1f} GB)")
+    print(f"  Main feature: {main_feature.name} ({main_size_gb:.1f} GB){plan_note}")
     if extras:
         print(f"  Extras: {len(extras)} file(s)")
 

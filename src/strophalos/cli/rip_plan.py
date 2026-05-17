@@ -25,13 +25,13 @@ from strophalos.cli.rip_video import rip_video_disc
 from strophalos.ripper.plan import find_plan_by_disc_id, plan_path
 
 
-def _show_plan(target: str, archive_root: str) -> int:
+def _show_plan(target: str, archive_root: str, bd_audio_root: str) -> int:
     """Pretty-print an existing plan.  `target` is a disc_id or a file/dir path."""
     p = Path(target)
     if p.is_dir():
         p = plan_path(p)
     if not p.exists():
-        hit = find_plan_by_disc_id(archive_root, target)
+        hit = find_plan_by_disc_id([archive_root, bd_audio_root], target)
         if hit is None:
             print(f"no plan found for disc_id/path: {target}", file=sys.stderr)
             return 1
@@ -52,7 +52,12 @@ def _show_plan(target: str, archive_root: str) -> int:
     print(f"  classifier: {cls.get('disc_type')} — suggested {cls.get('suggested_titles_to_rip')}")
     print(f"              ({cls.get('reason')})")
     pl = data.get("plan", {})
-    flag = " [OVERRIDE]" if pl.get("manual_override") else ""
+    flags = []
+    if pl.get("manual_override"):
+        flags.append("OVERRIDE")
+    if pl.get("forced_rip_all"):
+        flags.append("FORCED-RIP-ALL")
+    flag = f" [{', '.join(flags)}]" if flags else ""
     print(f"  plan:       {pl.get('disc_type')} — titles_to_rip {pl.get('titles_to_rip')}{flag}")
     if pl.get("note"):
         print(f"              note: {pl['note']}")
@@ -80,6 +85,11 @@ def main() -> int:
     )
     parser.add_argument("--label", default=None, help="Override disc volume label")
     parser.add_argument(
+        "--output-bd-audio",
+        default="/output-bd",
+        help="Audio Blu-ray output base directory (also searched by --show)",
+    )
+    parser.add_argument(
         "--show",
         metavar="DISC_ID_OR_PATH",
         help="Pretty-print an existing plan (walks archive if given a disc_id)",
@@ -87,7 +97,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.show:
-        return _show_plan(args.show, args.output)
+        return _show_plan(args.show, args.output, args.output_bd_audio)
 
     result = rip_video_disc(args.drive, args.label, args.output, dry_run=True)
     if result is None:

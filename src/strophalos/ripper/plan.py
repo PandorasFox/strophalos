@@ -15,6 +15,7 @@ title list.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +48,7 @@ class PlanBlock:
     disc_type: str
     titles_to_rip: list[int]
     manual_override: bool = False
+    forced_rip_all: bool = False
     note: str | None = None
 
 
@@ -135,25 +137,34 @@ def write_plan(rip_dir: str | Path, plan: RipPlan) -> Path:
     return path
 
 
-def find_plan_by_disc_id(archive_root: str | Path, disc_id: str) -> tuple[Path, RipPlan] | None:
-    """Walk `archive_root` for a `.rip-plan.json` whose `disc_id` matches.
+def find_plan_by_disc_id(
+    archive_roots: str | Path | Iterable[str | Path],
+    disc_id: str,
+) -> tuple[Path, RipPlan] | None:
+    """Walk archive root(s) for a `.rip-plan.json` whose `disc_id` matches.
 
+    Accepts a single path or an iterable of paths — music BDs and videos
+    can live under different mounts (e.g. /media/archive vs /output-bd).
     Returns (rip_dir, plan) for the first match, or None.  Corrupt plans
     are skipped silently.
     """
-    root = Path(archive_root)
-    if not root.exists():
-        return None
-    for path in root.rglob(PLAN_FILENAME):
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
+    if isinstance(archive_roots, str | Path):
+        roots: list[Path] = [Path(archive_roots)]
+    else:
+        roots = [Path(r) for r in archive_roots]
+    for root in roots:
+        if not root.exists():
             continue
-        if data.get("disc_id") == disc_id:
+        for path in root.rglob(PLAN_FILENAME):
             try:
-                return path.parent, _plan_from_dict(data)
-            except (KeyError, TypeError):
+                data = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
                 continue
+            if data.get("disc_id") == disc_id:
+                try:
+                    return path.parent, _plan_from_dict(data)
+                except (KeyError, TypeError):
+                    continue
     return None
 
 
