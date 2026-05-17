@@ -54,8 +54,13 @@ def search_movie(
     label: str,
     duration_seconds: float = 0,
     mkv_title: str | None = None,
-) -> dict | None:
-    """Search TMDb for a movie. Returns best result dict or None.
+) -> tuple[dict, str] | None:
+    """Search TMDb for a movie. Returns (best result, winning query) or None.
+
+    The "winning query" is the exact string that produced the results list the
+    pick came from — needed so callers can sanity-check that the resolved title
+    actually relates to the search input (catalog-code labels like ``HALO_22``
+    will otherwise happily runtime-match an unrelated 90m film).
 
     When *duration_seconds* is provided, fetches runtimes for the top results
     and prefers the candidate whose runtime is closest to the file duration.
@@ -67,6 +72,7 @@ def search_movie(
         return None
 
     results: list[dict] = []
+    winning_query = query
 
     # Prefer MKV title — MakeMKV embeds the real title in the filename
     if mkv_title:
@@ -76,6 +82,8 @@ def search_movie(
             data = _tmdb_get("/search/movie", {"query": clean_title})
             if data:
                 results = data.get("results", [])
+            if results:
+                winning_query = clean_title
 
     # Fallback 1: disc label
     if not results:
@@ -95,6 +103,8 @@ def search_movie(
                 data = _tmdb_get("/search/movie", {"query": retry_query})
                 if data:
                     results = data.get("results", [])
+                if results:
+                    winning_query = retry_query
 
     # Fallback 3: web search for the mangled label, then re-query TMDb
     if not results:
@@ -104,6 +114,8 @@ def search_movie(
             data = _tmdb_get("/search/movie", {"query": kagi_title})
             if data:
                 results = data.get("results", [])
+            if results:
+                winning_query = kagi_title
 
     if not results:
         return None
@@ -111,8 +123,8 @@ def search_movie(
     # Without a duration hint, just take the top result.
     if not duration_seconds or len(results) == 1:
         top = results[0]
-        print(f"  TMDb: matched '{query}' → {top.get('title')} ({top.get('release_date', '?')[:4]})")
-        return top
+        print(f"  TMDb: matched '{winning_query}' → {top.get('title')} ({top.get('release_date', '?')[:4]})")
+        return top, winning_query
 
     # Fetch runtimes for the top candidates and pick the closest match.
     candidates = results[:5]
@@ -141,8 +153,8 @@ def search_movie(
             best_diff = diff
             best = r
 
-    print(f"  TMDb: matched '{query}' → {best.get('title')} ({best.get('release_date', '?')[:4]})")
-    return best
+    print(f"  TMDb: matched '{winning_query}' → {best.get('title')} ({best.get('release_date', '?')[:4]})")
+    return best, winning_query
 
 
 # ---------------------------------------------------------------------------

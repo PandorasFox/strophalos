@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -14,6 +15,92 @@ from strophalos.core.mkv import get_mkv_duration
 from strophalos.core.notify import notify
 from strophalos.daemon.manifest import settle_identify, write_conflict
 from strophalos.ripper.plan import read_plan
+
+# Tokens that carry no identifying signal — they show up in catalog codes,
+# generic placeholder titles ("title_t00.mkv" → "title"), and edition
+# suffixes, and would otherwise produce false token-overlap matches.
+_STOPWORDS = {
+    "the", "a", "an", "and", "of", "in", "at", "to", "on", "for", "with",
+    "disc", "disk", "title", "untitled", "bd", "bdmv", "dvd", "uhd", "hd",
+    "edition", "extended", "complete", "collection", "vol", "volume",
+}
+
+
+def _tokens(s: str | None) -> set[str]:
+    """Lowercase alphanumeric tokens (>=2 chars, not stopwords)."""
+    if not s:
+        return set()
+    return {t for t in re.findall(r"[A-Za-z0-9]+", s.lower()) if len(t) >= 2 and t not in _STOPWORDS}
+
+
+def _resolved_title_plausible(label: str, mkv_stem: str, winning_query: str, resolved_title: str) -> bool:
+    """True if the resolved TMDb title shares a meaningful token with the
+    query that produced it (or with the raw disc label / MKV stem).
+
+    Catalog-code labels like ``HALO_22`` survive TMDb's runtime-closeness
+    pick without any string relationship to the picked movie; this guard
+    is what stops a 92-minute concert disc from getting silently filed as
+    a coincidentally-90-minute boxing flick.
+    """
+    result = _tokens(resolved_title)
+    if not result:
+        return True  # Nothing to compare against — don't block on this alone
+    sources = _tokens(label) | _tokens(mkv_stem) | _tokens(winning_query)
+    return bool(result & sources)
+
+
+def _link_as_unidentified(
+    disc_dir: Path,
+    library: Path,
+    label: str,
+    main_feature: Path,
+    extras: list[Path],
+    *,
+    resolved_title: str | None,
+    winning_query: str | None,
+    dry_run: bool,
+) -> None:
+    """Hard-link the rip to ``library/movies/<label>/`` with original names.
+
+    Used when TMDb returns a result whose title has no token overlap with
+    the search input — i.e. a likely false-positive match.  The user gets
+    something they can browse and rename rather than a confidently-wrong
+    folder, and the state machine still records ``no_tmdb_match`` so a
+    later retry (after they fix the TMDb entry or edit the plan) can take
+    over.
+    """
+    label_safe = sanitize_filename(label.replace("_", " ").strip()) or "Unidentified"
+    movie_dir = library / "movies" / label_safe
+    action = "would link" if dry_run else "link"
+    print(f"  {action} as unidentified: movies/{label_safe}/")
+    if not dry_run:
+        movie_dir.mkdir(parents=True, exist_ok=True)
+    for src in (main_feature, *extras):
+        dest = movie_dir / src.name
+        if dest.exists():
+            if dest.stat().st_ino == src.stat().st_ino:
+                continue  # Already linked
+            print(f"  skip (conflict): {dest}")
+            continue
+        print(f"  {action}: {src.name} → movies/{label_safe}/{src.name}")
+        if not dry_run:
+            os.link(src, dest)
+
+    msg = (
+        f"TMDb returned '{resolved_title}' for query '{winning_query}' but it shares no "
+        f"meaningful tokens with label '{label}'. Linked to movies/{label_safe}/ for "
+        "manual review. Fix the TMDb entry or edit .rip-plan.json (manual_override) "
+        "and re-insert the disc to retry."
+    )
+    print(f"  {msg}")
+    settle_identify(
+        disc_dir,
+        status="no_tmdb_match",
+        summary=msg,
+        notify_title=f"{label}: identification suspect — linked unidentified",
+        notify_body=msg,
+        notify_error=True,
+    )
 
 
 def main() -> None:
@@ -86,8 +173,8 @@ def main() -> None:
     duration = get_mkv_duration(main_feature)
     if duration:
         print(f"  Duration: {duration / 60:.0f}m")
-    movie = search_movie(args.label, duration_seconds=duration, mkv_title=main_feature.stem)
-    if not movie:
+    match = search_movie(args.label, duration_seconds=duration, mkv_title=main_feature.stem)
+    if not match:
         clean = clean_movie_label(args.label)
         msg = f"No TMDb match for '{clean}'. Add the movie at https://www.themoviedb.org and re-run."
         print(f"  {msg}")
@@ -100,9 +187,29 @@ def main() -> None:
             notify_error=True,
         )
         return
+    movie, winning_query = match
 
     title = movie.get("title", clean_movie_label(args.label))
     year = movie.get("release_date", "")[:4]
+
+    # Sanity-check the resolved title against the search input.  When the
+    # disc label is a pure catalog code (HALO_22, UPK75 etc.) and Kagi can't
+    # resolve it, /search/movie's top-5 runtime-closest pick is essentially
+    # random; without this gate we'd silently file the rip under that wrong
+    # title.  See _resolved_title_plausible for the overlap rule.
+    if not _resolved_title_plausible(args.label, main_feature.stem, winning_query, title):
+        print(f"  TMDb match '{title}' ({year}) has no token overlap with query '{winning_query}' / label '{args.label}'")
+        _link_as_unidentified(
+            disc_dir,
+            library,
+            args.label,
+            main_feature,
+            extras,
+            resolved_title=f"{title} ({year})" if year else title,
+            winning_query=winning_query,
+            dry_run=args.dry_run,
+        )
+        return
     title_safe = sanitize_filename(title)
     folder_name = f"{title_safe} ({year})" if year else title_safe
 
