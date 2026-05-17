@@ -9,7 +9,9 @@ that lack a corresponding identification manifest.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +25,16 @@ IDENTIFY_MANIFESTS = (
 )
 
 CONFLICT_MANIFEST = ".identify-conflict.json"
+IDENTIFY_STATE_FILENAME = ".identify-state.json"
+
+# Retry windows (seconds)
+_NO_TMDB_MATCH_RETRY = 24 * 3600
+
+# External resources that can unblock a state.  Maps blocker name → file path.
+# When the file's mtime is newer than the attempt timestamp, the state is retried.
+BLOCKER_FILES = {
+    "opensubtitles_token": Path("/config/opensubtitles.json"),
+}
 
 
 @dataclass
@@ -147,6 +159,135 @@ def _conflict_still_valid(output_dir: Path) -> bool:
     return True
 
 
+def compute_inputs_fingerprint(rip_dir: Path) -> str:
+    """SHA1 over (filename, size) of MKV files in *rip_dir*.
+
+    Detects when the rip's input set changes — added/removed/replaced files —
+    without being noisy about touch-only mtime updates.
+    """
+    parts: list[str] = []
+    for mkv in sorted(rip_dir.glob("*_t[0-9][0-9].mkv")):
+        try:
+            parts.append(f"{mkv.name}:{mkv.stat().st_size}")
+        except OSError:
+            parts.append(f"{mkv.name}:?")
+    return hashlib.sha1("\n".join(parts).encode()).hexdigest()
+
+
+def read_identify_state(rip_dir: Path) -> dict | None:
+    path = rip_dir / IDENTIFY_STATE_FILENAME
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def write_identify_state(
+    rip_dir: Path,
+    *,
+    status: str,
+    fingerprint: str,
+    summary: str,
+    blocker: str | None = None,
+) -> None:
+    data = {
+        "status": status,
+        "blocker": blocker,
+        "inputs_fingerprint": fingerprint,
+        "attempted_at": datetime.now().isoformat(),
+        "summary": summary,
+    }
+    path = rip_dir / IDENTIFY_STATE_FILENAME
+    path.write_text(json.dumps(data, indent=2))
+
+
+def settle_identify(
+    rip_dir: Path,
+    *,
+    status: str,
+    summary: str,
+    blocker: str | None = None,
+    notify_title: str | None = None,
+    notify_body: str | None = None,
+    notify_error: bool = False,
+) -> None:
+    """Persist the identify outcome and, on state transitions only, notify.
+
+    A "transition" is any change in ``status``, ``summary``, or
+    ``inputs_fingerprint`` versus the previous ``.identify-state.json``.
+    This is what keeps the user's notification channel from receiving the
+    same message every time the daemon's identify loop re-runs.
+    """
+    from strophalos.core.notify import notify as _notify
+
+    fingerprint = compute_inputs_fingerprint(rip_dir)
+    prior = read_identify_state(rip_dir)
+    is_new = (
+        prior is None
+        or prior.get("status") != status
+        or prior.get("summary") != summary
+        or prior.get("inputs_fingerprint") != fingerprint
+    )
+
+    if is_new and notify_title is not None:
+        _notify(notify_title, notify_body or "", error=notify_error)
+
+    write_identify_state(
+        rip_dir,
+        status=status,
+        fingerprint=fingerprint,
+        summary=summary,
+        blocker=blocker,
+    )
+
+
+def _state_blocks_retry(rip_dir: Path) -> bool:
+    """Return True if a prior identify attempt settled this rip — skip it.
+
+    Returns False (retry) when:
+      - no state file exists
+      - the current input fingerprint differs from the recorded one
+      - status is retry-worthy and its retry condition is met:
+          * blocked: the blocker resource (e.g. OS token file) mtime has advanced
+          * no_tmdb_match: more than _NO_TMDB_MATCH_RETRY seconds elapsed
+    """
+    state = read_identify_state(rip_dir)
+    if state is None:
+        return False
+
+    if state.get("inputs_fingerprint") != compute_inputs_fingerprint(rip_dir):
+        return False
+
+    status = state.get("status")
+    attempted_at = state.get("attempted_at", "")
+
+    if status == "blocked":
+        blocker = state.get("blocker")
+        blocker_path = BLOCKER_FILES.get(blocker) if blocker else None
+        if blocker_path and blocker_path.exists():
+            try:
+                attempted_ts = datetime.fromisoformat(attempted_at).timestamp()
+            except ValueError:
+                return False
+            if blocker_path.stat().st_mtime > attempted_ts:
+                return False
+        return True
+
+    if status == "no_tmdb_match":
+        try:
+            attempted_ts = datetime.fromisoformat(attempted_at).timestamp()
+        except ValueError:
+            return False
+        if time.time() - attempted_ts > _NO_TMDB_MATCH_RETRY:
+            return False
+        return True
+
+    # success / partial / no_match → settled until inputs change
+    return True
+
+
 def find_pending_rips(archive_root: Path) -> list[tuple[Path, RipManifest]]:
     """Find rip directories with status='done' that lack identification manifests."""
     results = []
@@ -164,6 +305,9 @@ def find_pending_rips(archive_root: Path) -> list[tuple[Path, RipManifest]]:
             continue
         # Skip if there is an unresolved conflict (avoids notification spam)
         if _conflict_still_valid(rip_dir):
+            continue
+        # Skip if a prior identify attempt settled this rip and nothing has changed.
+        if _state_blocks_retry(rip_dir):
             continue
         results.append((rip_dir, manifest))
     return results

@@ -25,7 +25,7 @@ from strophalos.backends.tvdb import supplement_episodes
 from strophalos.core.fs import parse_season_disc, sanitize_filename
 from strophalos.core.mkv import get_mkv_duration
 from strophalos.core.notify import notify
-from strophalos.daemon.manifest import write_conflict
+from strophalos.daemon.manifest import settle_identify, write_conflict
 from strophalos.identify.assignment import assign_episodes, build_double_episode_window, find_best_window
 from strophalos.identify.subtitles import extract_subtitles
 from strophalos.types import Episode, MatchResult, RippedFile
@@ -117,7 +117,15 @@ def main() -> None:
     except AuthError as exc:
         msg = f"Identification blocked: {exc}"
         print(f"  {msg}")
-        notify(f"{series_name}: identification blocked", msg, error=True)
+        settle_identify(
+            out_dir,
+            status="blocked",
+            blocker="opensubtitles_token",
+            summary=msg,
+            notify_title=f"{series_name}: identification blocked",
+            notify_body=msg,
+            notify_error=True,
+        )
         return
     if hash_results:
         for path, (season, episode, title) in hash_results.items():
@@ -154,11 +162,27 @@ def main() -> None:
                 f"  docker exec strophalos identify-episodes --dir {args.dir} --label {args.label}"
             )
             print(f"  {msg}")
-            notify(f"{series_name}: identification failed", msg, error=True)
+            settle_identify(
+                out_dir,
+                status="no_tmdb_match",
+                summary=msg,
+                notify_title=f"{series_name}: identification failed",
+                notify_body=msg,
+                notify_error=True,
+            )
+            return
         elif not episodes:
             msg = f"TMDb matched '{series_name}' but no episodes found. Check the TMDb entry has seasons/episodes."
             print(f"  {msg}")
-            notify(f"{series_name}: no episodes on TMDb", msg, error=True)
+            settle_identify(
+                out_dir,
+                status="no_tmdb_match",
+                summary=msg,
+                notify_title=f"{series_name}: no episodes on TMDb",
+                notify_body=msg,
+                notify_error=True,
+            )
+            return
         if episodes:
             n_seasons = len({ep.season for ep in episodes})
             print(f"  {len(episodes)} episodes across {n_seasons} season(s)")
@@ -227,7 +251,15 @@ def main() -> None:
                     except AuthError as exc:
                         msg = f"Identification blocked: {exc}"
                         print(f"  {msg}")
-                        notify(f"{series_name}: identification blocked", msg, error=True)
+                        settle_identify(
+                            out_dir,
+                            status="blocked",
+                            blocker="opensubtitles_token",
+                            summary=msg,
+                            notify_title=f"{series_name}: identification blocked",
+                            notify_body=msg,
+                            notify_error=True,
+                        )
                         return
 
                 if need_subs and reference_subs:
@@ -502,10 +534,21 @@ def main() -> None:
     title = f"{series_name}: episodes linked"
     print(f"\n{title}\n{body}")
 
-    if unmatched_names:
-        notify(title, body, error=True)
+    if matched_manifest and unmatched_names:
+        status = "partial"
+    elif matched_manifest:
+        status = "success"
     else:
-        notify(title, body)
+        status = "no_match"
+
+    settle_identify(
+        out_dir,
+        status=status,
+        summary=f"{len(files)} title(s) → {len(matched_manifest)} linked",
+        notify_title=title,
+        notify_body=body,
+        notify_error=bool(unmatched_names),
+    )
 
 
 if __name__ == "__main__":

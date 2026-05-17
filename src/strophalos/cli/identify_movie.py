@@ -12,7 +12,7 @@ from strophalos.backends.tmdb import clean_movie_label, search_movie
 from strophalos.core.fs import sanitize_filename
 from strophalos.core.mkv import get_mkv_duration
 from strophalos.core.notify import notify
-from strophalos.daemon.manifest import write_conflict
+from strophalos.daemon.manifest import settle_identify, write_conflict
 
 
 def main() -> None:
@@ -56,7 +56,14 @@ def main() -> None:
         clean = clean_movie_label(args.label)
         msg = f"No TMDb match for '{clean}'. Add the movie at https://www.themoviedb.org and re-run."
         print(f"  {msg}")
-        notify(f"{clean}: identification failed", msg, error=True)
+        settle_identify(
+            disc_dir,
+            status="no_tmdb_match",
+            summary=msg,
+            notify_title=f"{clean}: identification failed",
+            notify_body=msg,
+            notify_error=True,
+        )
         return
 
     title = movie.get("title", clean_movie_label(args.label))
@@ -146,7 +153,13 @@ def main() -> None:
     body = f"{title} ({year})\n{main_size_gb:.1f} GB main feature"
     if extras:
         body += f"\n{len(extras)} extra(s)"
-    notify(f"{title}: linked to library", body)
+    settle_identify(
+        disc_dir,
+        status="success",
+        summary=f"{title} ({year}) linked",
+        notify_title=f"{title}: linked to library",
+        notify_body=body,
+    )
     print(f"Done: {folder_name}")
 
 
