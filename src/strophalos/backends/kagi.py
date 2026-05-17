@@ -67,13 +67,13 @@ def _extract_title(raw: str) -> str | None:
     title = re.split(r"\s*[|]\s*", raw, maxsplit=1)[0]
     title = re.sub(r"\s+-\s+(?:Wikipedia|IMDb|Rotten Tomatoes|Metacritic|Amazon\.com).*$", "", title)
 
-    # Strip format/edition suffixes
+    # Strip format/edition suffixes (parens or square brackets)
     title = re.sub(
-        r"\s*\(?\b("
+        r"\s*[(\[]?\b("
         r"4K|UHD|Blu-ray|DVD|BD|Ultra HD|Digital|Steelbook|"
         r"Collector.s Edition|Special Edition|Limited Edition|"
         r"Complete Series|Box Set"
-        r")\b\)?.*$",
+        r")\b[)\]]?.*$",
         "",
         title,
         flags=re.IGNORECASE,

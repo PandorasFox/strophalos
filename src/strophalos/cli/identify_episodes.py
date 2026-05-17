@@ -352,7 +352,7 @@ def main() -> None:
                     # duration score of ~2.0); weak files stay unmatched rather
                     # than being assigned by position. --force bypasses the gate.
                     # --min-score still applies (duration-only path).
-                    SUB_CONFIDENCE_THRESHOLD = 3.0
+                    SUB_CONFIDENCE_THRESHOLD = 6.0
                     sub_gate = bool(reference_subs) and not args.force
 
                     skipped_weak: list[tuple[str, float]] = []

@@ -27,6 +27,8 @@ def extract_subtitles(mkv_path: Path, duration: float, *, full: bool = False) ->
 
     cutoff = duration * 0.25
 
+    results: list[tuple[float, str]] = []
+
     with tempfile.TemporaryDirectory() as tmpdir:
         sub_path = Path(tmpdir) / "subs"
 
@@ -42,21 +44,18 @@ def extract_subtitles(mkv_path: Path, duration: float, *, full: bool = False) ->
                     timeout=30,
                 )
             except Exception:
-                return []
-            if not out.exists():
-                return []
-
-            text = out.read_text(errors="replace")
-            if "ASS" in track.codec.upper() or "SSA" in track.codec.upper():
-                results: list[tuple[float, str]] = []
-                for match in re.finditer(r"Dialogue:\s*\d+,(\d+):(\d+):([\d.]+),.*?,.*?,.*?,.*?,.*?,.*?,(.*)", text):
-                    h, m, s2 = int(match.group(1)), int(match.group(2)), float(match.group(3))
-                    ts = h * 3600 + m * 60 + s2
-                    line = re.sub(r"\{[^}]*\}", "", match.group(4)).strip()
-                    if line:
-                        results.append((ts, line))
-            else:
-                results = parse_srt(text)
+                pass
+            if out.exists():
+                text = out.read_text(errors="replace")
+                if "ASS" in track.codec.upper() or "SSA" in track.codec.upper():
+                    for match in re.finditer(r"Dialogue:\s*\d+,(\d+):(\d+):([\d.]+),.*?,.*?,.*?,.*?,.*?,.*?,(.*)", text):
+                        h, m, s2 = int(match.group(1)), int(match.group(2)), float(match.group(3))
+                        ts = h * 3600 + m * 60 + s2
+                        line = re.sub(r"\{[^}]*\}", "", match.group(4)).strip()
+                        if line:
+                            results.append((ts, line))
+                else:
+                    results = parse_srt(text)
         else:
             # PGS subs: extract .sup then OCR via pgsrip
             sup_path = sub_path.with_suffix(".sup")
@@ -68,30 +67,26 @@ def extract_subtitles(mkv_path: Path, duration: float, *, full: bool = False) ->
                     timeout=60,
                 )
             except Exception:
-                return []
-            if not sup_path.exists() or sup_path.stat().st_size == 0:
-                return []
+                pass
+            if sup_path.exists() and sup_path.stat().st_size > 0:
+                # Run pgsrip to produce .srt
+                try:
+                    subprocess.run(
+                        ["python3", "-m", "pgsrip", str(sup_path)],
+                        capture_output=True,
+                        timeout=300,
+                    )
+                except Exception:
+                    pass
 
-            # Run pgsrip to produce .srt
-            try:
-                subprocess.run(
-                    ["python3", "-m", "pgsrip", str(sup_path)],
-                    capture_output=True,
-                    timeout=300,
-                )
-            except Exception:
-                return []
-
-            srt_path = sup_path.with_suffix(".srt")
-            if not srt_path.exists():
-                return []
-
-            results = parse_srt(srt_path.read_text(errors="replace"))
+                srt_path = sup_path.with_suffix(".srt")
+                if srt_path.exists():
+                    results = parse_srt(srt_path.read_text(errors="replace"))
 
     if not full and cutoff > 0:
         results = [(t, text) for t, text in results if t <= cutoff]
 
-    # If embedded subs yielded nothing, try Whisper
+    # If embedded subs yielded nothing, fall back to Whisper
     if not results:
         print(f"    subtitle: embedded extraction yielded 0 cues for {mkv_path.name}, trying whisper")
         return transcribe(mkv_path, duration)

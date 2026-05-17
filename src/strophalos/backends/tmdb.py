@@ -183,6 +183,14 @@ def search_series(label: str) -> tuple[int, str] | None:
                     results = data.get("results", [])
         if not results:
             kagi_title = search_disc_title(label, media_type="tv")
+            if kagi_title:
+                # Strip box-set season numbering (e.g. "Show: Season 4" → "Show")
+                kagi_title = re.sub(
+                    r":?\s*(?:The\s+)?(?:Complete\s+)?(?:Season|Series)\s+[\d.]+.*$",
+                    "",
+                    kagi_title,
+                    flags=re.IGNORECASE,
+                ).strip(" -–—:") or None
             if kagi_title and kagi_title.lower() != query.lower():
                 print(f"  TMDb: retrying with Kagi-resolved title '{kagi_title}'")
                 data = _tmdb_get("/search/tv", {"query": kagi_title})
