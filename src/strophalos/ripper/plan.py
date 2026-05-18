@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -53,6 +53,22 @@ class PlanBlock:
 
 
 @dataclass
+class IdentifyOverride:
+    """Pinned TMDB match — bypasses search in identify-movie/identify-episodes.
+
+    Set `tmdb_id` + `tmdb_type` to skip TMDb search entirely.  For TV, `season`
+    optionally overrides the season parsed from the disc label (useful when the
+    label doesn't carry season info, or when the disc spans a different season
+    than the label implies — e.g. a miniseries you want pinned to S1).
+    """
+
+    tmdb_id: int | None = None
+    tmdb_type: str | None = None  # "movie" | "tv"
+    season: int | None = None
+    note: str | None = None
+
+
+@dataclass
 class RipPlan:
     disc_id: str
     id_type: str  # "bd_sha256" | "dvd_crc64"
@@ -62,6 +78,7 @@ class RipPlan:
     titles: list[TitleRecord]
     classification: ClassificationRecord
     plan: PlanBlock
+    identify: IdentifyOverride = field(default_factory=IdentifyOverride)
 
 
 def plan_path(rip_dir: str | Path) -> Path:
@@ -106,6 +123,7 @@ def build_title_records(
 
 
 def _plan_from_dict(data: dict) -> RipPlan:
+    identify_raw = data.get("identify") or {}
     return RipPlan(
         disc_id=data["disc_id"],
         id_type=data["id_type"],
@@ -115,6 +133,7 @@ def _plan_from_dict(data: dict) -> RipPlan:
         titles=[TitleRecord(**t) for t in data.get("titles", [])],
         classification=ClassificationRecord(**data["classification"]),
         plan=PlanBlock(**data["plan"]),
+        identify=IdentifyOverride(**identify_raw),
     )
 
 
@@ -177,6 +196,7 @@ def build_plan(
     titles: list[TitleRecord],
     classification: ClassificationRecord,
     plan_block: PlanBlock,
+    identify: IdentifyOverride | None = None,
 ) -> RipPlan:
     return RipPlan(
         disc_id=disc_id,
@@ -187,4 +207,5 @@ def build_plan(
         titles=titles,
         classification=classification,
         plan=plan_block,
+        identify=identify if identify is not None else IdentifyOverride(),
     )

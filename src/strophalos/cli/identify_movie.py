@@ -9,7 +9,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from strophalos.backends.tmdb import clean_movie_label, search_movie
+from strophalos.backends.tmdb import clean_movie_label, fetch_movie_by_id, search_movie
 from strophalos.core.fs import sanitize_filename
 from strophalos.core.mkv import get_mkv_duration
 from strophalos.core.notify import notify
@@ -173,21 +173,33 @@ def main() -> None:
     duration = get_mkv_duration(main_feature)
     if duration:
         print(f"  Duration: {duration / 60:.0f}m")
-    match = search_movie(args.label, duration_seconds=duration, mkv_title=main_feature.stem)
-    if not match:
-        clean = clean_movie_label(args.label)
-        msg = f"No TMDb match for '{clean}'. Add the movie at https://www.themoviedb.org and re-run."
-        print(f"  {msg}")
-        settle_identify(
-            disc_dir,
-            status="no_tmdb_match",
-            summary=msg,
-            notify_title=f"{clean}: identification failed",
-            notify_body=msg,
-            notify_error=True,
-        )
-        return
-    movie, winning_query = match
+    movie: dict | None = None
+    winning_query: str | None = None
+    pinned = False
+    if plan is not None and plan.identify.tmdb_id and plan.identify.tmdb_type == "movie":
+        print(f"  TMDb: using pinned override id={plan.identify.tmdb_id} from .rip-plan.json")
+        movie = fetch_movie_by_id(plan.identify.tmdb_id)
+        if movie:
+            pinned = True
+        else:
+            print(f"  TMDb override id={plan.identify.tmdb_id} did not resolve; falling back to search")
+
+    if movie is None:
+        match = search_movie(args.label, duration_seconds=duration, mkv_title=main_feature.stem)
+        if not match:
+            clean = clean_movie_label(args.label)
+            msg = f"No TMDb match for '{clean}'. Add the movie at https://www.themoviedb.org and re-run."
+            print(f"  {msg}")
+            settle_identify(
+                disc_dir,
+                status="no_tmdb_match",
+                summary=msg,
+                notify_title=f"{clean}: identification failed",
+                notify_body=msg,
+                notify_error=True,
+            )
+            return
+        movie, winning_query = match
 
     title = movie.get("title", clean_movie_label(args.label))
     year = movie.get("release_date", "")[:4]
@@ -196,8 +208,9 @@ def main() -> None:
     # disc label is a pure catalog code (HALO_22, UPK75 etc.) and Kagi can't
     # resolve it, /search/movie's top-5 runtime-closest pick is essentially
     # random; without this gate we'd silently file the rip under that wrong
-    # title.  See _resolved_title_plausible for the overlap rule.
-    if not _resolved_title_plausible(args.label, main_feature.stem, winning_query, title):
+    # title.  See _resolved_title_plausible for the overlap rule.  Pinned
+    # plan overrides bypass this — the user explicitly chose the ID.
+    if not pinned and not _resolved_title_plausible(args.label, main_feature.stem, winning_query or "", title):
         print(f"  TMDb match '{title}' ({year}) has no token overlap with query '{winning_query}' / label '{args.label}'")
         _link_as_unidentified(
             disc_dir,

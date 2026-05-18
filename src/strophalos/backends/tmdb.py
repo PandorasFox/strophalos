@@ -197,12 +197,15 @@ def search_series(label: str) -> tuple[int, str] | None:
             kagi_title = search_disc_title(label, media_type="tv")
             if kagi_title:
                 # Strip box-set season numbering (e.g. "Show: Season 4" → "Show")
-                kagi_title = re.sub(
-                    r":?\s*(?:The\s+)?(?:Complete\s+)?(?:Season|Series)\s+[\d.]+.*$",
-                    "",
-                    kagi_title,
-                    flags=re.IGNORECASE,
-                ).strip(" -–—:") or None
+                kagi_title = (
+                    re.sub(
+                        r":?\s*(?:The\s+)?(?:Complete\s+)?(?:Season|Series)\s+[\d.]+.*$",
+                        "",
+                        kagi_title,
+                        flags=re.IGNORECASE,
+                    ).strip(" -–—:")
+                    or None
+                )
             if kagi_title and kagi_title.lower() != query.lower():
                 print(f"  TMDb: retrying with Kagi-resolved title '{kagi_title}'")
                 data = _tmdb_get("/search/tv", {"query": kagi_title})
@@ -285,6 +288,31 @@ def fetch_episodes_standard(series_id: int) -> list[Episode]:
     return episodes
 
 
+def fetch_episodes_for_series(
+    series_id: int,
+    series_name: str | None = None,
+) -> tuple[list[Episode], list[Episode], str | None, str | None, int]:
+    """Fetch episodes for a known TMDb series_id (skips search).
+
+    Looks up the series name when not provided.  Same return shape as
+    `fetch_all_episodes` for a uniform call site.
+    """
+    if not series_name:
+        series_data = _tmdb_get(f"/tv/{series_id}")
+        series_name = (series_data or {}).get("name") if series_data else None
+
+    eps = fetch_episodes_from_group(series_id)
+    group_name: str | None = "DVD Order"
+    if not eps:
+        print("  TMDb: no DVD episode group, using standard ordering")
+        eps = fetch_episodes_standard(series_id)
+        group_name = None
+
+    regular = sorted([ep for ep in eps if ep.season > 0], key=lambda e: (e.season, e.episode))
+    specials = sorted([ep for ep in eps if ep.season == 0], key=lambda e: e.episode)
+    return regular, specials, group_name, series_name, series_id
+
+
 def fetch_all_episodes(label: str) -> tuple[list[Episode], list[Episode], str | None, str | None, int | None]:
     """Fetch all episodes for a series.
 
@@ -296,19 +324,16 @@ def fetch_all_episodes(label: str) -> tuple[list[Episode], list[Episode], str | 
         return [], [], None, None, None
 
     series_id, series_name = result
+    return fetch_episodes_for_series(series_id, series_name)
 
-    # Prefer DVD/BD episode group
-    eps = fetch_episodes_from_group(series_id)
-    group_name: str | None = "DVD Order"
-    if not eps:
-        print("  TMDb: no DVD episode group, using standard ordering")
-        eps = fetch_episodes_standard(series_id)
-        group_name = None
 
-    regular = sorted([ep for ep in eps if ep.season > 0], key=lambda e: (e.season, e.episode))
-    specials = sorted([ep for ep in eps if ep.season == 0], key=lambda e: e.episode)
-
-    return regular, specials, group_name, series_name, series_id
+def fetch_movie_by_id(tmdb_id: int) -> dict | None:
+    """Fetch a movie record by TMDb ID — same shape as `search_movie` result."""
+    detail = _tmdb_get(f"/movie/{tmdb_id}")
+    if not detail:
+        return None
+    print(f"  TMDb: pinned id={tmdb_id} → {detail.get('title')} ({(detail.get('release_date') or '?')[:4]})")
+    return detail
 
 
 # ---------------------------------------------------------------------------

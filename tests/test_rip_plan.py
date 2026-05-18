@@ -7,6 +7,7 @@ from pathlib import Path
 
 from strophalos.ripper.plan import (
     ClassificationRecord,
+    IdentifyOverride,
     PlanBlock,
     TitleRecord,
     build_plan,
@@ -87,6 +88,44 @@ class TestRoundTrip:
         assert loaded.plan.note == "hand-picked"
         assert loaded.classification.suggested_titles_to_rip == [6, 7, 8, 9, 16]
         assert {t.tid for t in loaded.titles} == {0, 1, 6, 16, 42}
+
+
+class TestIdentifyOverride:
+    def test_default_empty_block_roundtrips(self, tmp_path: Path):
+        write_plan(tmp_path, _make_plan())
+        loaded = read_plan(tmp_path)
+        assert loaded is not None
+        assert loaded.identify.tmdb_id is None
+        assert loaded.identify.tmdb_type is None
+        assert loaded.identify.season is None
+
+    def test_pinned_tv_match_roundtrips(self, tmp_path: Path):
+        plan = _make_plan()
+        plan.identify = IdentifyOverride(
+            tmdb_id=71365,
+            tmdb_type="tv",
+            season=1,
+            note="BSG miniseries pinned to S1",
+        )
+        write_plan(tmp_path, plan)
+        loaded = read_plan(tmp_path)
+        assert loaded is not None
+        assert loaded.identify.tmdb_id == 71365
+        assert loaded.identify.tmdb_type == "tv"
+        assert loaded.identify.season == 1
+        assert loaded.identify.note == "BSG miniseries pinned to S1"
+
+    def test_missing_identify_block_in_legacy_file(self, tmp_path: Path):
+        # Pre-feature plan files don't have an "identify" key
+        path = plan_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        plan = _make_plan()
+        data = json.loads(json.dumps(plan, default=lambda o: o.__dict__))
+        data.pop("identify", None)
+        path.write_text(json.dumps(data))
+        loaded = read_plan(tmp_path)
+        assert loaded is not None
+        assert loaded.identify.tmdb_id is None
 
 
 class TestCorruptFile:

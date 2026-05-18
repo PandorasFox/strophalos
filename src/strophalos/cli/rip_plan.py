@@ -61,6 +61,11 @@ def _show_plan(target: str, archive_root: str, bd_audio_root: str) -> int:
     print(f"  plan:       {pl.get('disc_type')} — titles_to_rip {pl.get('titles_to_rip')}{flag}")
     if pl.get("note"):
         print(f"              note: {pl['note']}")
+    ident = data.get("identify") or {}
+    if ident.get("tmdb_id"):
+        season = f" season={ident['season']}" if ident.get("season") is not None else ""
+        ident_note = f"  ({ident['note']})" if ident.get("note") else ""
+        print(f"  identify:   tmdb_id={ident['tmdb_id']} type={ident.get('tmdb_type')}{season}{ident_note}")
     print()
     print("  Titles:")
     for t in data.get("titles", []):

@@ -20,7 +20,7 @@ from pathlib import Path
 
 from strophalos.backends import anidb, opensubtitles
 from strophalos.backends.opensubtitles import AuthError
-from strophalos.backends.tmdb import fetch_all_episodes
+from strophalos.backends.tmdb import fetch_all_episodes, fetch_episodes_for_series
 from strophalos.backends.tvdb import supplement_episodes
 from strophalos.core.fs import parse_season_disc, sanitize_filename
 from strophalos.core.mkv import get_mkv_duration
@@ -28,6 +28,7 @@ from strophalos.core.notify import notify
 from strophalos.daemon.manifest import settle_identify, write_conflict
 from strophalos.identify.assignment import assign_episodes, build_double_episode_window, find_best_window
 from strophalos.identify.subtitles import extract_subtitles
+from strophalos.ripper.plan import read_plan
 from strophalos.types import Episode, MatchResult, RippedFile
 
 
@@ -99,6 +100,15 @@ def main() -> None:
         series_name = args.label.replace("_", " ").strip()
     library_dir = Path(args.library)
 
+    plan = read_plan(out_dir)
+    pin_series_id: int | None = None
+    if plan is not None and plan.identify.tmdb_id and plan.identify.tmdb_type == "tv":
+        pin_series_id = plan.identify.tmdb_id
+        print(f"  TMDb: pinned series id={pin_series_id} from .rip-plan.json")
+        if plan.identify.season is not None:
+            label_season = plan.identify.season
+            print(f"  TMDb: pinned season={label_season} from .rip-plan.json")
+
     # Build RippedFile objects with durations
     files: list[RippedFile] = []
     for mkv in mkv_files:
@@ -153,7 +163,10 @@ def main() -> None:
         pipeline_notes.append("All files identified via hash lookup")
     else:
         # --- Phase 1+: TMDb + duration + reference subtitles ---
-        episodes, specials, group_name, tmdb_name, series_id = fetch_all_episodes(args.label)
+        if pin_series_id is not None:
+            episodes, specials, group_name, tmdb_name, series_id = fetch_episodes_for_series(pin_series_id)
+        else:
+            episodes, specials, group_name, tmdb_name, series_id = fetch_all_episodes(args.label)
         if tmdb_name:
             series_name = tmdb_name
         if not episodes and not tmdb_name:

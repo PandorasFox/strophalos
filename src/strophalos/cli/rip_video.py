@@ -551,6 +551,7 @@ def rip_video_disc(
         )
         if override_dir and existing_plan:
             plan_block = existing_plan[1].plan
+            identify_block = existing_plan[1].identify
         else:
             plan_block = PlanBlock(
                 disc_type=disc_type,
@@ -558,6 +559,7 @@ def rip_video_disc(
                 manual_override=False,
                 forced_rip_all=rip_all_env,
             )
+            identify_block = None
         plan = build_plan(
             disc_id=disc_id,
             id_type=id_type,
@@ -566,6 +568,7 @@ def rip_video_disc(
             titles=title_records,
             classification=classification,
             plan_block=plan_block,
+            identify=identify_block,
         )
         write_plan(out_dir, plan)
         print(f"  Plan: {plan_path(out_dir)}")

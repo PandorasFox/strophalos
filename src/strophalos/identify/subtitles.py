@@ -48,7 +48,8 @@ def extract_subtitles(mkv_path: Path, duration: float, *, full: bool = False) ->
             if out.exists():
                 text = out.read_text(errors="replace")
                 if "ASS" in track.codec.upper() or "SSA" in track.codec.upper():
-                    for match in re.finditer(r"Dialogue:\s*\d+,(\d+):(\d+):([\d.]+),.*?,.*?,.*?,.*?,.*?,.*?,(.*)", text):
+                    pattern = r"Dialogue:\s*\d+,(\d+):(\d+):([\d.]+),.*?,.*?,.*?,.*?,.*?,.*?,(.*)"
+                    for match in re.finditer(pattern, text):
                         h, m, s2 = int(match.group(1)), int(match.group(2)), float(match.group(3))
                         ts = h * 3600 + m * 60 + s2
                         line = re.sub(r"\{[^}]*\}", "", match.group(4)).strip()
