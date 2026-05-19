@@ -20,9 +20,32 @@ from strophalos.ripper.plan import read_plan
 # generic placeholder titles ("title_t00.mkv" → "title"), and edition
 # suffixes, and would otherwise produce false token-overlap matches.
 _STOPWORDS = {
-    "the", "a", "an", "and", "of", "in", "at", "to", "on", "for", "with",
-    "disc", "disk", "title", "untitled", "bd", "bdmv", "dvd", "uhd", "hd",
-    "edition", "extended", "complete", "collection", "vol", "volume",
+    "the",
+    "a",
+    "an",
+    "and",
+    "of",
+    "in",
+    "at",
+    "to",
+    "on",
+    "for",
+    "with",
+    "disc",
+    "disk",
+    "title",
+    "untitled",
+    "bd",
+    "bdmv",
+    "dvd",
+    "uhd",
+    "hd",
+    "edition",
+    "extended",
+    "complete",
+    "collection",
+    "vol",
+    "volume",
 }
 
 
@@ -89,7 +112,7 @@ def _link_as_unidentified(
     msg = (
         f"TMDb returned '{resolved_title}' for query '{winning_query}' but it shares no "
         f"meaningful tokens with label '{label}'. Linked to movies/{label_safe}/ for "
-        "manual review. Fix the TMDb entry or edit .rip-plan.json (manual_override) "
+        "manual review. Fix the TMDb entry or pin identify.tmdb_id in .rip-plan.json "
         "and re-insert the disc to retry."
     )
     print(f"  {msg}")
@@ -135,7 +158,6 @@ def main() -> None:
     plan_note = ""
     if plan is not None:
         cls = plan.classification
-        pl = plan.plan
         if cls.disc_type == "movie" and len(cls.suggested_titles_to_rip) == 1:
             main_tid = cls.suggested_titles_to_rip[0]
             suffix = f"_t{main_tid:02d}.mkv"
@@ -151,13 +173,9 @@ def main() -> None:
                 )
         elif cls.disc_type != "movie":
             # Classifier disagreed with the rip target (e.g. TV/music ripped
-            # via override).  Note it but keep going — caller invoked
+            # via plan override).  Note it but keep going — caller invoked
             # identify-movie deliberately.
             plan_note = f" [plan classifier said: {cls.disc_type}]"
-        if pl.forced_rip_all:
-            plan_note += " [forced rip-all]"
-        elif pl.manual_override:
-            plan_note += " [manual override]"
     if main_feature is None:
         main_feature = max(mkv_files, key=lambda p: p.stat().st_size)
 
@@ -211,7 +229,9 @@ def main() -> None:
     # title.  See _resolved_title_plausible for the overlap rule.  Pinned
     # plan overrides bypass this — the user explicitly chose the ID.
     if not pinned and not _resolved_title_plausible(args.label, main_feature.stem, winning_query or "", title):
-        print(f"  TMDb match '{title}' ({year}) has no token overlap with query '{winning_query}' / label '{args.label}'")
+        print(
+            f"  TMDb match '{title}' ({year}) has no token overlap with query '{winning_query}' / label '{args.label}'"
+        )
         _link_as_unidentified(
             disc_dir,
             library,

@@ -1,22 +1,28 @@
-"""Per-disc-id rip plan — editable JSON manifest with manual override.
+"""Per-disc-id rip plan — editable JSON manifest.
 
 The plan file lives at `{rip_dir}/.rip-plan.json`, alongside the ripped MKVs
-and the existing `.rip-manifest.json` / `.disc-id.json` artifacts.  The
-classifier writes it on every rip; the user can edit the `plan` block
-(set `manual_override: true`, change `titles_to_rip` / `disc_type`) and
-reinsert the disc to drive a re-rip with the override.
+and the existing `.rip-manifest.json` / `.disc-id.json` artifacts.
 
-On reinsertion we recompute `disc_id` and walk the archive for an existing
-plan with a matching `disc_id` — if found with `manual_override`, we rip
-into the same directory (replacing the previous MKVs) using the edited
-title list.
+Lifecycle:
+  - First scan of a disc: the classifier seeds `plan` (disc_type +
+    titles_to_rip) and we write the file.
+  - On re-insertion of the same disc (matched by `disc_id`): the existing
+    plan's `plan` block and `identify` block are authoritative — user
+    edits to `titles_to_rip` / `disc_type` / `identify.tmdb_id` always
+    win.  The `classification`, `titles`, and `scanned_at` fields are
+    refreshed each run; they're informational and surface disc-state
+    drift across scans.
+  - Reset to classifier defaults: `rm <dir>/.rip-plan.json` and re-insert.
+
+In other words: the plan file's existence IS the override signal.  There
+is no separate flag to flip.
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 
@@ -47,8 +53,6 @@ class ClassificationRecord:
 class PlanBlock:
     disc_type: str
     titles_to_rip: list[int]
-    manual_override: bool = False
-    forced_rip_all: bool = False
     note: str | None = None
 
 
@@ -122,8 +126,14 @@ def build_title_records(
     return records
 
 
+_PLAN_BLOCK_FIELDS = {f.name for f in fields(PlanBlock)}
+
+
 def _plan_from_dict(data: dict) -> RipPlan:
     identify_raw = data.get("identify") or {}
+    # Legacy plan files (pre-cleanup) had `manual_override` and `forced_rip_all`
+    # keys on the plan block; drop any unknown keys so old files still load.
+    plan_raw = {k: v for k, v in data["plan"].items() if k in _PLAN_BLOCK_FIELDS}
     return RipPlan(
         disc_id=data["disc_id"],
         id_type=data["id_type"],
@@ -132,7 +142,7 @@ def _plan_from_dict(data: dict) -> RipPlan:
         scanned_at=data["scanned_at"],
         titles=[TitleRecord(**t) for t in data.get("titles", [])],
         classification=ClassificationRecord(**data["classification"]),
-        plan=PlanBlock(**data["plan"]),
+        plan=PlanBlock(**plan_raw),
         identify=IdentifyOverride(**identify_raw),
     )
 

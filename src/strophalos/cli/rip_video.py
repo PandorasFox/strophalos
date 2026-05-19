@@ -456,8 +456,8 @@ def rip_video_disc(
     classifier_suggested = list(to_rip)
 
     # STROPHALOS_RIP_ALL_TITLES=1 — force ripping every scanned title and
-    # bypass the music-BD chapter-split flow.  Plan's manual_override (below)
-    # still wins so per-disc edits stay authoritative.
+    # bypass the music-BD chapter-split flow.  Only affects first-seed of a
+    # plan; once a plan file exists for the disc, it wins below.
     rip_all_env = os.environ.get("STROPHALOS_RIP_ALL_TITLES", "").strip().lower() in ("1", "true", "yes")
     if rip_all_env:
         all_tids = sorted(durations.keys())
@@ -479,16 +479,23 @@ def rip_video_disc(
     # under output_bd_audio, not the main archive, so search both roots
     # — otherwise an edited plan for a music disc gets missed and the
     # re-rip lands in disc2 with the classifier's original pick.
-    # If found with manual_override=true, rip into that directory with the
-    # edited title list; otherwise fall through and compute a fresh out_dir.
+    #
+    # If a plan exists, it wins: same dir, user's titles_to_rip / disc_type /
+    # identify pin.  The classifier still runs but its output stays in the
+    # informational `classification` block.  To reset to classifier defaults,
+    # `rm .rip-plan.json` and re-insert.
     override_dir: str | None = None
     existing_plan = find_plan_by_disc_id([output, output_bd_audio], disc_id) if disc_id else None
-    if existing_plan and existing_plan[1].plan.manual_override:
-        override_dir, prev_plan = existing_plan[0], existing_plan[1]
-        override_dir = str(override_dir)
+    if existing_plan:
+        plan_dir, prev_plan = existing_plan
+        override_dir = str(plan_dir)
         disc_type = prev_plan.plan.disc_type
         to_rip = list(prev_plan.plan.titles_to_rip)
-        print(f"\nManual override: ripping {to_rip} (disc_type={disc_type})  [from {override_dir}]")
+        tag = " [identify pinned]" if prev_plan.identify.tmdb_id else ""
+        edited = list(prev_plan.plan.titles_to_rip) != list(prev_plan.classification.suggested_titles_to_rip)
+        if edited:
+            tag = " [user-edited]" + tag
+        print(f"\nUsing existing plan: {to_rip} (disc_type={disc_type})  [from {override_dir}]{tag}")
 
     dir_label = label or disc_label or "unknown_disc"
 
@@ -549,15 +556,16 @@ def rip_video_disc(
             reason=reason,
             suggested_titles_to_rip=classifier_suggested,
         )
-        if override_dir and existing_plan:
+        if existing_plan:
+            # Existing plan is authoritative — user edits to titles_to_rip /
+            # disc_type / identify survive every re-rip.  Only the
+            # classification + titles + scanned_at fields refresh.
             plan_block = existing_plan[1].plan
             identify_block = existing_plan[1].identify
         else:
             plan_block = PlanBlock(
                 disc_type=disc_type,
                 titles_to_rip=list(to_rip),
-                manual_override=False,
-                forced_rip_all=rip_all_env,
             )
             identify_block = None
         plan = build_plan(
@@ -577,10 +585,12 @@ def rip_video_disc(
 
     if dry_run:
         print("\n[dry-run] Would rip the above titles.")
-        if disc_id and not (existing_plan and existing_plan[1].plan.manual_override):
+        if disc_id:
             print(
-                f"  Edit {plan_path(out_dir)} "
-                "(set manual_override=true and adjust titles_to_rip) and re-rip to override."
+                f"  Edit {plan_path(out_dir)} and re-insert to override:\n"
+                "    - plan.titles_to_rip / plan.disc_type — drives the rip.\n"
+                "    - identify.tmdb_id + tmdb_type (+ season for TV) — pins the TMDB match.\n"
+                "    - rm the file to reset to classifier defaults."
             )
         return RipResult(
             output_dir=out_dir,

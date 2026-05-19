@@ -38,11 +38,10 @@ def _sample_titles() -> list[TitleRecord]:
     )
 
 
-def _make_plan(disc_id: str = "abc123", override: bool = False, titles_to_rip: list[int] | None = None):
+def _make_plan(disc_id: str = "abc123", titles_to_rip: list[int] | None = None):
     block = PlanBlock(
         disc_type="tv",
         titles_to_rip=titles_to_rip if titles_to_rip is not None else [6, 7, 8, 9, 16],
-        manual_override=override,
     )
     return build_plan(
         disc_id=disc_id,
@@ -75,7 +74,7 @@ class TestBuildTitleRecords:
 
 class TestRoundTrip:
     def test_write_then_read(self, tmp_path: Path):
-        plan = _make_plan(override=True, titles_to_rip=[0, 1])
+        plan = _make_plan(titles_to_rip=[0, 1])
         plan.plan.note = "hand-picked"
         write_plan(tmp_path, plan)
 
@@ -83,11 +82,26 @@ class TestRoundTrip:
         loaded = read_plan(tmp_path)
         assert loaded is not None
         assert loaded.disc_id == "abc123"
-        assert loaded.plan.manual_override is True
         assert loaded.plan.titles_to_rip == [0, 1]
         assert loaded.plan.note == "hand-picked"
         assert loaded.classification.suggested_titles_to_rip == [6, 7, 8, 9, 16]
         assert {t.tid for t in loaded.titles} == {0, 1, 6, 16, 42}
+
+    def test_legacy_flags_ignored_on_load(self, tmp_path: Path):
+        # Plans written before the manual_override/forced_rip_all cleanup
+        # carry those extra keys.  read_plan should drop them silently.
+        path = plan_path(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = json.loads(json.dumps(_make_plan(titles_to_rip=[0, 1]), default=lambda o: o.__dict__))
+        data["plan"]["manual_override"] = True
+        data["plan"]["forced_rip_all"] = True
+        path.write_text(json.dumps(data))
+
+        loaded = read_plan(tmp_path)
+        assert loaded is not None
+        assert loaded.plan.titles_to_rip == [0, 1]
+        assert not hasattr(loaded.plan, "manual_override")
+        assert not hasattr(loaded.plan, "forced_rip_all")
 
 
 class TestIdentifyOverride:
@@ -140,13 +154,12 @@ class TestCorruptFile:
 class TestFindByDiscId:
     def test_finds_plan_in_nested_rip_dir(self, tmp_path: Path):
         rip_dir = tmp_path / "tv" / "rips" / "bd" / "BSG" / "Season 04" / "Disc 02"
-        write_plan(rip_dir, _make_plan(disc_id="bsg-d2", override=True, titles_to_rip=[0, 1, 2, 3, 4]))
+        write_plan(rip_dir, _make_plan(disc_id="bsg-d2", titles_to_rip=[0, 1, 2, 3, 4]))
 
         hit = find_plan_by_disc_id(tmp_path, "bsg-d2")
         assert hit is not None
         found_dir, found_plan = hit
         assert found_dir == rip_dir
-        assert found_plan.plan.manual_override is True
         assert found_plan.plan.titles_to_rip == [0, 1, 2, 3, 4]
 
     def test_returns_none_when_no_match(self, tmp_path: Path):

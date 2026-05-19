@@ -6,9 +6,11 @@ stopped or idle container:
   1. `rip-plan --drive 0` — scan the disc, write `.rip-plan.json` into the
      prospective rip output directory (classifier's choice), print the
      path.  No rip happens.
-  2. Edit the plan file (set `manual_override: true`, adjust
-     `titles_to_rip` / `disc_type`).
-  3. Reinsert the disc and run the normal rip — the override wins.
+  2. Edit the plan file (adjust `titles_to_rip` / `disc_type` /
+     `identify.tmdb_id`).  No flag to flip — edits to an existing plan
+     are always honored.
+  3. Reinsert the disc and let the daemon re-rip into the same dir.
+     `rm` the plan file to reset to classifier defaults.
 
 `rip-plan --show DISC_ID` walks the archive for an existing plan and
 pretty-prints it without touching the drive.
@@ -53,10 +55,10 @@ def _show_plan(target: str, archive_root: str, bd_audio_root: str) -> int:
     print(f"              ({cls.get('reason')})")
     pl = data.get("plan", {})
     flags = []
-    if pl.get("manual_override"):
-        flags.append("OVERRIDE")
-    if pl.get("forced_rip_all"):
-        flags.append("FORCED-RIP-ALL")
+    if pl.get("titles_to_rip") != cls.get("suggested_titles_to_rip"):
+        flags.append("USER-EDITED")
+    if pl.get("disc_type") and pl.get("disc_type") != cls.get("disc_type"):
+        flags.append(f"TYPE-OVERRIDDEN ({cls.get('disc_type')} → {pl.get('disc_type')})")
     flag = f" [{', '.join(flags)}]" if flags else ""
     print(f"  plan:       {pl.get('disc_type')} — titles_to_rip {pl.get('titles_to_rip')}{flag}")
     if pl.get("note"):
