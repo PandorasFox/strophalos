@@ -3,30 +3,46 @@
 The plan file lives at `{rip_dir}/.rip-plan.json`, alongside the ripped MKVs
 and the existing `.rip-manifest.json` / `.disc-id.json` artifacts.
 
-Lifecycle:
-  - First scan of a disc: the classifier seeds `plan` (disc_type +
-    titles_to_rip) and we write the file.
-  - On re-insertion of the same disc (matched by `disc_id`): the existing
-    plan's `plan` block and `identify` block are authoritative — user
-    edits to `titles_to_rip` / `disc_type` / `identify.tmdb_id` always
+Lifecycle (two-pass):
+  - First insertion of a disc: the daemon scans, the classifier seeds
+    `plan` (disc_type + titles_to_rip), the file is written, and the disc
+    is ejected WITHOUT ripping.
+  - While the disc is out, the user optionally edits the plan:
+    `plan.titles_to_rip` / `plan.disc_type` drive the rip;
+    `identify.url` (or legacy `identify.tmdb_id`) pins the whole-disc
+    match; `identify.matches` maps individual titles to TMDb/MusicBrainz
+    entries by URL (multi-movie discs, pinned music releases).
+  - Re-insertion of the same disc (matched by `disc_id`): the plan is
+    validated and the rip runs per its `plan` block.  The existing
+    `plan` and `identify` blocks are authoritative — user edits always
     win.  The `classification`, `titles`, and `scanned_at` fields are
-    refreshed each run; they're informational and surface disc-state
-    drift across scans.
-  - Reset to classifier defaults: `rm <dir>/.rip-plan.json` and re-insert.
+    refreshed each scan; they're informational and surface disc-state
+    drift.
+  - Reset to classifier defaults: `rm <dir>/.rip-plan.json` and re-insert
+    (the next insertion re-plans and ejects again).
 
-In other words: the plan file's existence IS the override signal.  There
-is no separate flag to flip.
+In other words: the plan file's existence IS the "validated" signal.
+There is no separate approval flag to flip.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 
 PLAN_FILENAME = ".rip-plan.json"
+
+
+class PlanValidationError(Exception):
+    """A plan failed URL parsing or consistency validation.
+
+    The message lists every problem found, one per line, so the user can
+    fix the JSON in one editing pass.
+    """
 
 
 @dataclass
@@ -56,20 +72,154 @@ class PlanBlock:
     note: str | None = None
 
 
+@dataclass(frozen=True)
+class ParsedUrl:
+    """A provider URL decomposed into an addressable entry."""
+
+    provider: str  # "tmdb" | "musicbrainz"
+    kind: str  # "movie" | "tv" | "release"
+    id: str  # numeric string (tmdb) or release UUID (musicbrainz)
+    season: int | None = None  # from a .../tv/<id>/season/<n> URL
+
+
+_TMDB_URL_RE = re.compile(
+    r"^https?://(?:www\.)?themoviedb\.org"
+    r"/(movie|tv)/(\d+)(?:-[^/]*)?"
+    r"(?:/season/(\d+))?/?$"
+)
+# Any host with a /release/<uuid> path is treated as MusicBrainz — release
+# UUIDs are portable across mirrors, so URLs pasted from a self-hosted MB
+# server pin the same release as musicbrainz.org ones.
+_MB_RELEASE_URL_RE = re.compile(
+    r"^https?://[^/]+/release/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/?$",
+    re.IGNORECASE,
+)
+
+
+def parse_provider_url(url: str) -> ParsedUrl:
+    """Parse a TMDb or MusicBrainz URL into (provider, kind, id[, season]).
+
+    Raises PlanValidationError for anything unrecognized — unknown providers
+    must fail loudly rather than be silently ignored at identify time.
+    """
+    m = _TMDB_URL_RE.match(url.strip())
+    if m:
+        kind, tmdb_id, season = m.group(1), m.group(2), m.group(3)
+        if season is not None and kind != "tv":
+            raise PlanValidationError(f"season path on a non-tv TMDb URL: {url}")
+        return ParsedUrl("tmdb", kind, tmdb_id, int(season) if season else None)
+    m = _MB_RELEASE_URL_RE.match(url.strip())
+    if m:
+        return ParsedUrl("musicbrainz", "release", m.group(1).lower())
+    raise PlanValidationError(
+        f"unrecognized provider URL: {url!r} — expected a themoviedb.org "
+        "movie/tv URL or a MusicBrainz /release/<uuid> URL"
+    )
+
+
+@dataclass
+class TitleMatch:
+    """Maps ripped title(s) to one provider entry — `identify.matches[]`.
+
+    `url` is authoritative (the user pastes it); `provider`/`kind`/`id`/
+    `season` are derived at read time and materialized on rewrite for
+    humans reading the JSON.  An empty `titles` list means "the whole
+    disc" (the natural form for a music release pin).
+    """
+
+    url: str
+    titles: list[int] = field(default_factory=list)
+    provider: str | None = None
+    kind: str | None = None
+    id: str | None = None
+    season: int | None = None
+    note: str | None = None
+
+
 @dataclass
 class IdentifyOverride:
-    """Pinned TMDB match — bypasses search in identify-movie/identify-episodes.
+    """Pinned identify match — bypasses search in the identify-* CLIs.
 
-    Set `tmdb_id` + `tmdb_type` to skip TMDb search entirely.  For TV, `season`
-    optionally overrides the season parsed from the disc label (useful when the
-    label doesn't carry season info, or when the disc spans a different season
-    than the label implies — e.g. a miniseries you want pinned to S1).
+    Whole-disc pin: set `url` (TMDb movie/tv or MusicBrainz release URL) —
+    or the legacy `tmdb_id` + `tmdb_type` pair.  For TV, `season`
+    optionally overrides the season parsed from the disc label (useful when
+    the label doesn't carry season info, or when the disc spans a different
+    season than the label implies — e.g. a miniseries you want pinned to S1).
+
+    Per-title pins: `matches` maps subsets of `plan.titles_to_rip` to
+    provider entries — this is how a dual-feature disc becomes two movies.
     """
 
     tmdb_id: int | None = None
     tmdb_type: str | None = None  # "movie" | "tv"
     season: int | None = None
     note: str | None = None
+    url: str | None = None
+    matches: list[TitleMatch] = field(default_factory=list)
+
+
+def effective_pin(identify: IdentifyOverride) -> ParsedUrl | None:
+    """Resolve the whole-disc pin: `url` wins, legacy tmdb fields fall back.
+
+    Raises PlanValidationError if both are set and disagree, or the URL is
+    unparseable.  Returns None when nothing is pinned.
+    """
+    if identify.url:
+        parsed = parse_provider_url(identify.url)
+        if identify.tmdb_id is not None and (
+            parsed.provider != "tmdb"
+            or parsed.id != str(identify.tmdb_id)
+            or (identify.tmdb_type and parsed.kind != identify.tmdb_type)
+        ):
+            raise PlanValidationError(
+                f"identify.url ({parsed.provider} {parsed.kind} {parsed.id}) disagrees with "
+                f"legacy identify.tmdb_id={identify.tmdb_id}/tmdb_type={identify.tmdb_type!r} — "
+                "remove one of them"
+            )
+        season = parsed.season if parsed.season is not None else identify.season
+        return ParsedUrl(parsed.provider, parsed.kind, parsed.id, season)
+    if identify.tmdb_id is not None:
+        return ParsedUrl("tmdb", identify.tmdb_type or "", str(identify.tmdb_id), identify.season)
+    return None
+
+
+def pinned_release_id(identify: IdentifyOverride) -> str | None:
+    """The MusicBrainz release UUID pinned on this plan, if any.
+
+    Checks the whole-disc pin first, then `matches` (a release match's
+    `titles` list is ignored — a release always covers the whole disc).
+    Unparseable URLs are skipped here; validate_plan reports them.
+    """
+    try:
+        pin = effective_pin(identify)
+    except PlanValidationError:
+        pin = None
+    if pin and pin.provider == "musicbrainz":
+        return pin.id
+    for m in identify.matches:
+        try:
+            parsed = parse_provider_url(m.url)
+        except PlanValidationError:
+            continue
+        if parsed.kind == "release":
+            return parsed.id
+    return None
+
+
+def materialize_match_fields(identify: IdentifyOverride) -> None:
+    """Fill the derived provider/kind/id/season fields on each parseable
+    match in place (informational — shown to humans reading the JSON).
+    Unparseable URLs are left untouched; validate_plan reports them."""
+    for m in identify.matches:
+        try:
+            parsed = parse_provider_url(m.url)
+        except PlanValidationError:
+            continue
+        m.provider = parsed.provider
+        m.kind = parsed.kind
+        m.id = parsed.id
+        if parsed.season is not None:
+            m.season = parsed.season
 
 
 @dataclass
@@ -127,10 +277,18 @@ def build_title_records(
 
 
 _PLAN_BLOCK_FIELDS = {f.name for f in fields(PlanBlock)}
+_IDENTIFY_FIELDS = {f.name for f in fields(IdentifyOverride)}
+_TITLE_MATCH_FIELDS = {f.name for f in fields(TitleMatch)}
+
+
+def _identify_from_dict(raw: dict) -> IdentifyOverride:
+    raw = {k: v for k, v in raw.items() if k in _IDENTIFY_FIELDS}
+    matches_raw = raw.pop("matches", None) or []
+    matches = [TitleMatch(**{k: v for k, v in m.items() if k in _TITLE_MATCH_FIELDS}) for m in matches_raw]
+    return IdentifyOverride(matches=matches, **raw)
 
 
 def _plan_from_dict(data: dict) -> RipPlan:
-    identify_raw = data.get("identify") or {}
     # Legacy plan files (pre-cleanup) had `manual_override` and `forced_rip_all`
     # keys on the plan block; drop any unknown keys so old files still load.
     plan_raw = {k: v for k, v in data["plan"].items() if k in _PLAN_BLOCK_FIELDS}
@@ -143,7 +301,7 @@ def _plan_from_dict(data: dict) -> RipPlan:
         titles=[TitleRecord(**t) for t in data.get("titles", [])],
         classification=ClassificationRecord(**data["classification"]),
         plan=PlanBlock(**plan_raw),
-        identify=IdentifyOverride(**identify_raw),
+        identify=_identify_from_dict(data.get("identify") or {}),
     )
 
 
@@ -166,16 +324,32 @@ def write_plan(rip_dir: str | Path, plan: RipPlan) -> Path:
     return path
 
 
-def find_plan_by_disc_id(
+@dataclass
+class PlanHit:
+    """Result of a disc_id plan lookup.
+
+    `plan` is None when the file matched the disc_id but failed to load —
+    `error` says why.  Surfacing that instead of skipping prevents a
+    typo'd plan from silently triggering a fresh first-pass into a new
+    discN directory.
+    """
+
+    rip_dir: Path
+    plan: RipPlan | None
+    error: str | None = None
+
+
+def locate_plan(
     archive_roots: str | Path | Iterable[str | Path],
     disc_id: str,
-) -> tuple[Path, RipPlan] | None:
+) -> PlanHit | None:
     """Walk archive root(s) for a `.rip-plan.json` whose `disc_id` matches.
 
     Accepts a single path or an iterable of paths — music BDs and videos
     can live under different mounts (e.g. /media/archive vs /output-bd).
-    Returns (rip_dir, plan) for the first match, or None.  Corrupt plans
-    are skipped silently.
+    Returns a PlanHit for the first raw-JSON disc_id match, or None.
+    Files whose JSON can't be parsed at all are skipped (their disc_id is
+    unreadable, so they can't be attributed to this disc).
     """
     if isinstance(archive_roots, str | Path):
         roots: list[Path] = [Path(archive_roots)]
@@ -189,12 +363,73 @@ def find_plan_by_disc_id(
                 data = json.loads(path.read_text())
             except (OSError, json.JSONDecodeError):
                 continue
-            if data.get("disc_id") == disc_id:
-                try:
-                    return path.parent, _plan_from_dict(data)
-                except (KeyError, TypeError):
-                    continue
+            if data.get("disc_id") != disc_id:
+                continue
+            try:
+                return PlanHit(path.parent, _plan_from_dict(data))
+            except (KeyError, TypeError) as e:
+                err = f"plan file at {path} matched disc_id but failed to load: {e!r}"
+                return PlanHit(path.parent, None, error=err)
     return None
+
+
+def find_plan_by_disc_id(
+    archive_roots: str | Path | Iterable[str | Path],
+    disc_id: str,
+) -> tuple[Path, RipPlan] | None:
+    """Compat wrapper over locate_plan: (rip_dir, plan) or None."""
+    hit = locate_plan(archive_roots, disc_id)
+    if hit is None or hit.plan is None:
+        return None
+    return hit.rip_dir, hit.plan
+
+
+def validate_plan(plan: RipPlan, scanned_tids: set[int] | None = None) -> None:
+    """Consistency-check a plan; raise PlanValidationError listing ALL problems.
+
+    Checks the whole-disc pin, every `identify.matches` entry (URL parse,
+    kind vs plan.disc_type, title membership, duplicate title claims), and —
+    when `scanned_tids` is given (pass 2, disc in drive) — that every
+    `plan.titles_to_rip` entry actually exists on the disc.
+    """
+    errors: list[str] = []
+    try:
+        effective_pin(plan.identify)
+    except PlanValidationError as e:
+        errors.append(str(e))
+
+    claimed: dict[int, str] = {}
+    for i, m in enumerate(plan.identify.matches):
+        label = f"identify.matches[{i}]"
+        try:
+            parsed = parse_provider_url(m.url)
+        except PlanValidationError as e:
+            errors.append(f"{label}: {e}")
+            continue
+        if parsed.kind == "release" and plan.plan.disc_type != "music":
+            errors.append(
+                f"{label}: MusicBrainz release URL but plan.disc_type is {plan.plan.disc_type!r} — set it to 'music'"
+            )
+        elif parsed.kind in ("movie", "tv") and plan.plan.disc_type == "music":
+            errors.append(f"{label}: TMDb {parsed.kind} URL but plan.disc_type is 'music'")
+        for tid in m.titles:
+            if tid not in plan.plan.titles_to_rip:
+                errors.append(f"{label}: title {tid} is not in plan.titles_to_rip {plan.plan.titles_to_rip}")
+            if tid in claimed:
+                errors.append(f"{label}: title {tid} already claimed by {claimed[tid]}")
+            else:
+                claimed[tid] = label
+
+    if scanned_tids is not None:
+        missing = [t for t in plan.plan.titles_to_rip if t not in scanned_tids]
+        if missing:
+            errors.append(
+                f"plan.titles_to_rip contains title(s) {missing} not present on the "
+                f"disc; available titles: {sorted(scanned_tids)}"
+            )
+
+    if errors:
+        raise PlanValidationError("\n".join(errors))
 
 
 def build_plan(

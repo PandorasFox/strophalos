@@ -17,3 +17,6 @@ class RipResult:
     label: str = ""
     # Music BD metadata (set by rip_video when disc_type == "music")
     mb_metadata: dict | None = None
+    # True when this was a planning pass (plan written, nothing ripped) —
+    # the disc is ejected for plan review and rips on re-insertion.
+    planned: bool = False

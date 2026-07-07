@@ -241,6 +241,26 @@ def search_release(label: str, durations: list[float], prefer_bluray: bool = Fal
     return None
 
 
+def get_release_by_id(release_id: str) -> dict[str, Any] | None:
+    """Fetch a specific release by MBID (e.g. pinned via a rip-plan URL).
+
+    Returns the same shape as search_release —
+    {id, title, artist, tracks: [{position, title, recording_id, duration}]}
+    — or None when the release can't be fetched.
+    """
+    detail = _fetch_release_detail(release_id)
+    if not detail:
+        print(f"  MusicBrainz: release {release_id} not found")
+        return None
+    tracks = _get_release_tracks(detail, release_id)
+    return {
+        "id": release_id,
+        "title": detail.get("title", ""),
+        "artist": _get_artist(detail),
+        "tracks": tracks,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Disc classification helper (for rip-video: is this an audio BD?)
 # ---------------------------------------------------------------------------

@@ -112,11 +112,49 @@ Set `STROPHALOS_MODE` to control how far the pipeline runs:
 
 | Mode | What it does |
 |------|--------------|
-| `full` | Probe -> rip (includes scan/classify) -> identify -> eject. Default, all-in-one. |
-| `rip` | Probe -> rip -> eject. No identification. Use when another machine handles ID. |
-| `scan` | Probe -> scan/classify (dry-run, no rip) -> eject. Useful for testing. |
+| `full` | Two-pass (see below): first insertion plans + ejects, re-insertion rips per plan, then identifies. Default, all-in-one. |
+| `rip` | Same two-pass flow, but no identification. Use when another machine handles ID. |
+| `scan` | Probe -> scan/classify -> write/refresh the rip plan -> eject. Never rips, even for already-planned discs — useful for cataloging a stack. |
 | `probe` | Detect disc type and label -> eject. Fastest, just identification of the media. |
 | `identify` | No disc needed. Polls the archive for completed rips (`.rip-manifest.json` with `status: done`) and runs the appropriate identifier. Use on the machine with library access. |
+
+## Two-Pass Ripping (Rip Plans)
+
+Video discs (DVD/BD/UHD, including audio Blu-rays) rip in two passes:
+
+1. **First insertion** — the daemon scans and classifies the disc, writes an
+   editable `.rip-plan.json` into the prospective output directory (plus a
+   `.rip-manifest.json` with `status: planned`), sends a notification with
+   the plan path, and ejects. Nothing is ripped.
+2. **Review (optional)** — while the disc is out, edit the plan:
+   - `plan.titles_to_rip` / `plan.disc_type` — drive the rip.
+   - `identify.url` — pin the whole disc to a TMDb or MusicBrainz URL.
+   - `identify.matches` — map individual titles to entries by URL. This is
+     how a dual-feature disc becomes two properly-named movies:
+
+     ```json
+     "identify": {
+       "matches": [
+         {"url": "https://www.themoviedb.org/movie/1498-teenage-mutant-ninja-turtles", "titles": [3]},
+         {"url": "https://www.themoviedb.org/movie/8845-teenage-mutant-ninja-turtles-ii", "titles": [4]}
+       ]
+     }
+     ```
+
+     The first title in a match is that movie's main feature; any further
+     titles become its extras. MusicBrainz `/release/<uuid>` URLs (from
+     musicbrainz.org or a self-hosted server) pin audio-BD releases.
+   - `rm` the plan file to reset to classifier defaults.
+3. **Re-insertion** — the disc is recognized by its fingerprint
+   (`disc_id`), the plan is validated (bad URLs, stale title ids, etc.
+   fail loudly with a notification and an eject — nothing is wiped), and
+   the rip runs per the plan into the same directory. Re-inserting an
+   already-ripped disc re-rips it per its plan.
+
+The plan file's existence is the "validated" signal — an untouched plan
+rips exactly what the classifier picked. Check an edited plan before
+re-inserting with `rip-plan --validate <disc-id-or-path>`; discs that
+can't be fingerprinted (rare) fall back to the old single-pass rip.
 
 ### Split Architecture
 

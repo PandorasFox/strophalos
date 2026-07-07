@@ -39,7 +39,9 @@ BLOCKER_FILES = {
 
 @dataclass
 class RipManifest:
-    status: str  # "ripping" | "done" | "failed"
+    # "planned": plan written, disc ejected for review, rip pending re-insert.
+    # Identify mode ignores it (find_pending_rips only picks "done").
+    status: str  # "planned" | "ripping" | "done" | "failed"
     label: str
     disc_type: str  # "tv" | "movie" | "music" | "data"
     media_type: str  # "dvd" | "bd" | "uhd" | "cd" | "data"

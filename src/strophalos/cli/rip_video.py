@@ -1,7 +1,11 @@
 """CLI entry point for rip-video — smart video disc ripper.
 
-Scans disc, classifies content (movie/TV/music), rips selected titles,
-and outputs STROPHALOS_* metadata lines for backward compatibility.
+Two-pass flow: `plan_video_disc` scans/classifies and writes the rip plan
+(first insertion); `rip_planned_video_disc` rips per an existing plan
+(re-insertion).  `rip_video_disc` dispatches between them by disc_id and
+also offers the legacy one-insertion flow via `single_pass=True`.
+
+Outputs STROPHALOS_* metadata lines for backward compatibility.
 """
 
 from __future__ import annotations
@@ -10,9 +14,9 @@ import argparse
 import json
 import os
 import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from strophalos.core.fs import parse_season_disc, sanitize_filename
 from strophalos.ripper.classify import classify_disc
 from strophalos.ripper.dedup import dedup_segment_variants, filter_bitrate_outliers
 from strophalos.ripper.disc_id import compute_disc_id
@@ -20,11 +24,20 @@ from strophalos.ripper.orchestrate import run_rip, validate_rip
 from strophalos.ripper.plan import (
     ClassificationRecord,
     PlanBlock,
-    build_plan,
+    PlanValidationError,
+    RipPlan,
     build_title_records,
     find_plan_by_disc_id,
+    locate_plan,
+    pinned_release_id,
     plan_path,
-    write_plan,
+    validate_plan,
+)
+from strophalos.ripper.planner import (
+    compute_early_disc_id,
+    resolve_output_dir,
+    seed_or_refresh_plan,
+    wipe_rip_dir,
 )
 from strophalos.ripper.result import RipResult
 from strophalos.ripper.rip import rip_titles
@@ -400,14 +413,21 @@ def _rip_remaining_titles(
     print(f"  Music BD: {found} bonus track(s) from {len(title_ids)} title(s)")
 
 
-def rip_video_disc(
-    drive: int,
-    label: str | None = None,
-    output: str = "/media/archive",
-    output_bd_audio: str = "/output-bd",
-    dry_run: bool = False,
-) -> RipResult | None:
-    """Core rip-video logic. Returns structured result or None on failure."""
+@dataclass
+class VideoScan:
+    """Result of the slow makemkvcon scan phase."""
+
+    disc_label: str | None
+    all_titles: dict  # every scanned title (tid → attr map)
+    titles: dict  # post dedup / bitrate-filter
+    durations: dict[int, int]  # filtered
+    chapters: dict[int, int]  # filtered
+    media_type: str
+    dropped_reasons: dict[int, str] = field(default_factory=dict)
+
+
+def scan_video_disc(drive: int) -> VideoScan:
+    """Scan via makemkvcon, dedup segment variants, filter bitrate outliers."""
     print(f"Scanning disc in drive {drive}...")
     disc_label, all_titles, disc_info = scan_disc(drive)
     print(f"Disc label: {disc_label}")
@@ -443,7 +463,34 @@ def rip_video_disc(
         size_str = f", {sz_gb:.1f} GB" if sz else ""
         print(f"  Title {tid:2d}: {hours}:{mins:02d}:{secs:02d}  ({ch} chapters{size_str})")
 
-    disc_type, to_rip, reason, mb_metadata = classify_disc(durations, chapters, disc_label)
+    media_type = detect_media_type(disc_info)
+    print(f"Media type: {media_type}")
+
+    return VideoScan(
+        disc_label=disc_label,
+        all_titles=all_titles,
+        titles=titles,
+        durations=durations,
+        chapters=chapters,
+        media_type=media_type,
+        dropped_reasons=dropped_reasons,
+    )
+
+
+@dataclass
+class _Classified:
+    """Classifier verdict for one scan, plus the pristine pre-override snapshot."""
+
+    disc_type: str
+    to_rip: list[int]
+    reason: str
+    mb_metadata: dict | None
+    classifier_disc_type: str
+    classifier_suggested: list[int]
+
+
+def _classify_scan(scan: VideoScan) -> _Classified:
+    disc_type, to_rip, reason, mb_metadata = classify_disc(scan.durations, scan.chapters, scan.disc_label)
     print(f"\nClassification: {disc_type}")
     print(f"Reason: {reason}")
     print(f"Titles to rip: {to_rip}")
@@ -457,10 +504,10 @@ def rip_video_disc(
 
     # STROPHALOS_RIP_ALL_TITLES=1 — force ripping every scanned title and
     # bypass the music-BD chapter-split flow.  Only affects first-seed of a
-    # plan; once a plan file exists for the disc, it wins below.
+    # plan; once a plan file exists for the disc, its plan block wins.
     rip_all_env = os.environ.get("STROPHALOS_RIP_ALL_TITLES", "").strip().lower() in ("1", "true", "yes")
     if rip_all_env:
-        all_tids = sorted(durations.keys())
+        all_tids = sorted(scan.durations.keys())
         print(f"\nSTROPHALOS_RIP_ALL_TITLES=1: overriding to {len(all_tids)} title(s): {all_tids}")
         to_rip = all_tids
         # Keep disc_type so the output landing path stays sensible (music
@@ -468,146 +515,75 @@ def rip_video_disc(
         # music-BD chapter-split flow is bypassed and titles rip raw.
         mb_metadata = None
 
-    media_type = detect_media_type(disc_info)
-    print(f"Media type: {media_type}")
+    return _Classified(
+        disc_type=disc_type,
+        to_rip=list(to_rip),
+        reason=reason,
+        mb_metadata=mb_metadata,
+        classifier_disc_type=classifier_disc_type,
+        classifier_suggested=classifier_suggested,
+    )
 
-    # Compute disc ID before ripping (disc is still in drive)
-    device = os.environ.get("DEVICE", "/dev/sr1")
-    disc_id = compute_disc_id(media_type, device)
 
-    # Walk archive for an existing plan with this disc_id.  Music BDs land
-    # under output_bd_audio, not the main archive, so search both roots
-    # — otherwise an edited plan for a music disc gets missed and the
-    # re-rip lands in disc2 with the classifier's original pick.
-    #
-    # If a plan exists, it wins: same dir, user's titles_to_rip / disc_type /
-    # identify pin.  The classifier still runs but its output stays in the
-    # informational `classification` block.  To reset to classifier defaults,
-    # `rm .rip-plan.json` and re-insert.
-    override_dir: str | None = None
-    existing_plan = find_plan_by_disc_id([output, output_bd_audio], disc_id) if disc_id else None
-    if existing_plan:
-        plan_dir, prev_plan = existing_plan
-        override_dir = str(plan_dir)
-        disc_type = prev_plan.plan.disc_type
-        to_rip = list(prev_plan.plan.titles_to_rip)
-        tag = " [identify pinned]" if prev_plan.identify.tmdb_id else ""
-        edited = list(prev_plan.plan.titles_to_rip) != list(prev_plan.classification.suggested_titles_to_rip)
-        if edited:
-            tag = " [user-edited]" + tag
-        print(f"\nUsing existing plan: {to_rip} (disc_type={disc_type})  [from {override_dir}]{tag}")
+def _write_plan_for_scan(
+    scan: VideoScan,
+    cls: _Classified,
+    disc_id: str,
+    out_dir: str,
+    existing_plan: RipPlan | None,
+) -> RipPlan:
+    return seed_or_refresh_plan(
+        out_dir=out_dir,
+        disc_id=disc_id,
+        id_type="dvd_crc64" if scan.media_type == "dvd" else "bd_sha256",
+        disc_label=scan.disc_label,
+        media_type=scan.media_type,
+        title_records=build_title_records(
+            durations=get_title_durations(scan.all_titles),
+            chapters=get_title_chapters(scan.all_titles),
+            sizes=get_title_sizes(scan.all_titles),
+            source_filenames=get_title_source_filenames(scan.all_titles),
+            segment_maps=get_title_segment_maps(scan.all_titles),
+            dropped=scan.dropped_reasons,
+        ),
+        classification=ClassificationRecord(
+            disc_type=cls.classifier_disc_type,
+            reason=cls.reason,
+            suggested_titles_to_rip=cls.classifier_suggested,
+        ),
+        existing=existing_plan,
+        default_block=PlanBlock(disc_type=cls.disc_type, titles_to_rip=list(cls.to_rip)),
+    )
 
-    dir_label = label or disc_label or "unknown_disc"
 
-    if override_dir:
-        out_dir = override_dir
-        disc_num = 1
-    else:
-        # TV box sets (Mr. Robot: Season Two (Disc 1), MRROBOT_S1D1_NA, ...) — pull
-        # the series/season/disc out of the label and build a hierarchical path so
-        # each disc lands at {series}/Season NN/Disc NN.  Prefer the pretty title
-        # from MakeMKV since its prefix is already human-readable.
-        box_set = None
-        if disc_type == "tv":
-            box_set = parse_season_disc(disc_label or "") or parse_season_disc(label or "")
+def _pinned_mb_metadata(plan: RipPlan, fallback: dict | None) -> dict | None:
+    """mb_metadata for the music path: plan's pinned MB release wins over
+    whatever the classifier's own MusicBrainz search turned up."""
+    release_id = pinned_release_id(plan.identify)
+    if release_id:
+        print(f"  Music BD: using MusicBrainz release pinned in plan: {release_id}")
+        return {"id": release_id}
+    return fallback
 
-        # Music BDs go to a separate output path (like audio CDs go to /output-cd)
-        if disc_type == "music":
-            label_dir = os.path.join(output_bd_audio, dir_label)
-            disc_num = 1
-            while os.path.exists(os.path.join(label_dir, f"disc{disc_num}")):
-                disc_num += 1
-            out_dir = os.path.join(label_dir, f"disc{disc_num}")
-        elif box_set:
-            series_pretty, season_n, disc_n = box_set
-            series_dir = sanitize_filename(series_pretty)
-            label_dir = os.path.join(output, "tv", "rips", media_type, series_dir, f"Season {season_n:02d}")
-            disc_leaf = f"Disc {disc_n:02d}"
-            out_dir = os.path.join(label_dir, disc_leaf)
-            # Re-rip collision: only bump if the target already has content.
-            suffix = 2
-            while os.path.isdir(out_dir) and any(os.scandir(out_dir)):
-                out_dir = os.path.join(label_dir, f"{disc_leaf} ({suffix})")
-                suffix += 1
-            disc_num = disc_n
-        else:
-            content_type = {"tv": "tv"}.get(disc_type, "movies")
-            label_dir = os.path.join(output, content_type, "rips", media_type, dir_label)
-            disc_num = 1
-            while os.path.exists(os.path.join(label_dir, f"disc{disc_num}")):
-                disc_num += 1
-            out_dir = os.path.join(label_dir, f"disc{disc_num}")
 
-    # Build and persist the rip plan alongside the output.  On a plain dry
-    # run this creates the prospective out_dir with just the plan inside —
-    # user edits, reinserts, and the real rip follows.
-    if disc_id:
-        id_type = "dvd_crc64" if media_type == "dvd" else "bd_sha256"
-        title_records = build_title_records(
-            durations=get_title_durations(all_titles),
-            chapters=get_title_chapters(all_titles),
-            sizes=get_title_sizes(all_titles),
-            source_filenames=get_title_source_filenames(all_titles),
-            segment_maps=get_title_segment_maps(all_titles),
-            dropped=dropped_reasons,
-        )
-        classification = ClassificationRecord(
-            disc_type=classifier_disc_type,
-            reason=reason,
-            suggested_titles_to_rip=classifier_suggested,
-        )
-        if existing_plan:
-            # Existing plan is authoritative — user edits to titles_to_rip /
-            # disc_type / identify survive every re-rip.  Only the
-            # classification + titles + scanned_at fields refresh.
-            plan_block = existing_plan[1].plan
-            identify_block = existing_plan[1].identify
-        else:
-            plan_block = PlanBlock(
-                disc_type=disc_type,
-                titles_to_rip=list(to_rip),
-            )
-            identify_block = None
-        plan = build_plan(
-            disc_id=disc_id,
-            id_type=id_type,
-            disc_label=disc_label,
-            media_type=media_type,
-            titles=title_records,
-            classification=classification,
-            plan_block=plan_block,
-            identify=identify_block,
-        )
-        write_plan(out_dir, plan)
-        print(f"  Plan: {plan_path(out_dir)}")
-    else:
-        print("  Plan: skipped (no disc_id)")
+def _execute_rip(
+    drive: int,
+    scan: VideoScan,
+    out_dir: str,
+    disc_type: str,
+    to_rip: list[int],
+    mb_metadata: dict | None,
+    wipe_existing: bool,
+) -> int | None:
+    """Run the actual rip (music chapter-split or plain titles) into out_dir.
 
-    if dry_run:
-        print("\n[dry-run] Would rip the above titles.")
-        if disc_id:
-            print(
-                f"  Edit {plan_path(out_dir)} and re-insert to override:\n"
-                "    - plan.titles_to_rip / plan.disc_type — drives the rip.\n"
-                "    - identify.tmdb_id + tmdb_type (+ season for TV) — pins the TMDB match.\n"
-                "    - rm the file to reset to classifier defaults."
-            )
-        return RipResult(
-            output_dir=out_dir,
-            disc_type=disc_type,
-            media_type=media_type,
-            title_count=len(to_rip),
-            disc_id=disc_id,
-            label=dir_label,
-        )
-
-    # Override re-rip into an existing dir: wipe old MKVs so stale titles
-    # from the previous classifier attempt don't linger.  Plan + disc-id are
+    Returns the produced track/title count, or None on failure.
+    """
+    # Re-rip into an existing dir: wipe stale MKVs and identify artifacts so
+    # neither old titles nor old identification linger.  Plan + disc-id are
     # preserved.
-    if override_dir:
-        for entry in os.scandir(out_dir):
-            if entry.is_file() and entry.name.endswith(".mkv"):
-                os.unlink(entry.path)
+    if wipe_existing:
+        wipe_rip_dir(out_dir)
 
     # Music BD: special chapter-split rip flow
     if disc_type == "music" and mb_metadata:
@@ -622,36 +598,210 @@ def rip_video_disc(
                 mb_metadata["tracks"] = tracks
                 print(f"  Music BD: fetched {len(tracks)} track details from MB release {release_id}")
 
-        track_count = _rip_music_bd(drive, out_dir, durations, chapters, to_rip, mb_metadata)
-    else:
-        print(f"\nRipping {len(to_rip)} title(s) to {out_dir}...")
-        if not run_rip(lambda: rip_titles(drive, to_rip, out_dir), out_dir):
-            return None
-        valid = validate_rip(out_dir)
-        if valid is None:
-            return None
-        track_count = valid
+        return _rip_music_bd(drive, out_dir, scan.durations, scan.chapters, to_rip, mb_metadata)
 
-    # Persist disc ID in output directory
-    if disc_id:
-        disc_meta = {
-            "disc_id": disc_id,
-            "media_type": media_type,
-            "disc_label": dir_label,
-            "disc_number": disc_num,
-            "id_type": "dvd_crc64" if media_type == "dvd" else "bd_sha256",
-        }
-        meta_path = os.path.join(out_dir, ".disc-id.json")
-        try:
-            with open(meta_path, "w") as f:
-                json.dump(disc_meta, f, indent=2)
-        except Exception:
-            pass
+    print(f"\nRipping {len(to_rip)} title(s) to {out_dir}...")
+    if not run_rip(lambda: rip_titles(drive, to_rip, out_dir), out_dir):
+        return None
+    return validate_rip(out_dir)
+
+
+def _write_disc_id_meta(out_dir: str, disc_id: str | None, media_type: str, dir_label: str, disc_num: int) -> None:
+    """Persist .disc-id.json in the output directory."""
+    if not disc_id:
+        return
+    disc_meta = {
+        "disc_id": disc_id,
+        "media_type": media_type,
+        "disc_label": dir_label,
+        "disc_number": disc_num,
+        "id_type": "dvd_crc64" if media_type == "dvd" else "bd_sha256",
+    }
+    meta_path = os.path.join(out_dir, ".disc-id.json")
+    try:
+        with open(meta_path, "w") as f:
+            json.dump(disc_meta, f, indent=2)
+    except Exception:
+        pass
+
+
+def plan_video_disc(
+    drive: int,
+    label: str | None = None,
+    output: str = "/media/archive",
+    output_bd_audio: str = "/output-bd",
+    disc_id: str | None = None,
+) -> RipResult | None:
+    """Pass 1: scan, classify, and write the rip plan.  No rip.
+
+    An existing plan for the disc is refreshed in place (user's plan/identify
+    blocks preserved); otherwise a fresh plan is seeded into the prospective
+    output dir.  Returns a `planned=True` RipResult, or None when the disc
+    can't be fingerprinted (no plan written — caller falls back single-pass).
+    """
+    scan = scan_video_disc(drive)
+    cls = _classify_scan(scan)
+
+    if disc_id is None:
+        device = os.environ.get("DEVICE", "/dev/sr1")
+        disc_id = compute_disc_id(scan.media_type, device)
+    if not disc_id:
+        print("  Plan: skipped (no disc_id)")
+        return None
+
+    dir_label = label or scan.disc_label or "unknown_disc"
+
+    # Music BDs land under output_bd_audio, not the main archive, so search
+    # both roots — otherwise an edited plan for a music disc gets missed and
+    # the re-plan lands in disc2 with the classifier's original pick.
+    existing = find_plan_by_disc_id([output, output_bd_audio], disc_id)
+    if existing:
+        out_dir = str(existing[0])
+        existing_plan = existing[1]
+        print(f"\nRefreshing existing plan at {out_dir} (plan/identify blocks preserved)")
+    else:
+        existing_plan = None
+        out_dir, _ = resolve_output_dir(
+            disc_type=cls.disc_type,
+            media_type=scan.media_type,
+            dir_label=dir_label,
+            disc_label=scan.disc_label,
+            label=label,
+            output=output,
+            output_bd_audio=output_bd_audio,
+        )
+
+    plan = _write_plan_for_scan(scan, cls, disc_id, out_dir, existing_plan)
+    print(
+        f"\nPlanned {len(plan.plan.titles_to_rip)} title(s).  Edit {plan_path(out_dir)} then re-insert to rip:\n"
+        "    - plan.titles_to_rip / plan.disc_type — drives the rip.\n"
+        "    - identify.url — whole-disc TMDb/MusicBrainz pin.\n"
+        "    - identify.matches — per-title pins (multi-movie discs): "
+        '{"url": "https://www.themoviedb.org/movie/...", "titles": [N]}.\n'
+        "    - rm the file to reset to classifier defaults."
+    )
+    return RipResult(
+        output_dir=out_dir,
+        disc_type=plan.plan.disc_type,
+        media_type=scan.media_type,
+        title_count=len(plan.plan.titles_to_rip),
+        disc_id=disc_id,
+        label=dir_label,
+        planned=True,
+    )
+
+
+def rip_planned_video_disc(
+    drive: int,
+    plan_dir: str,
+    plan: RipPlan,
+    label: str | None = None,
+) -> RipResult | None:
+    """Pass 2: rip a re-inserted disc per its existing plan.
+
+    Scans (the rip needs the drive mapped anyway), validates the plan
+    against the scanned titles BEFORE wiping anything, refreshes the plan's
+    informational blocks on disk, then rips into the plan's directory.
+
+    Raises PlanValidationError when the plan no longer matches the disc.
+    """
+    scan = scan_video_disc(drive)
+    cls = _classify_scan(scan)
+
+    validate_plan(plan, scanned_tids=set(scan.all_titles))
+
+    out_dir = str(plan_dir)
+    disc_type = plan.plan.disc_type
+    to_rip = list(plan.plan.titles_to_rip)
+    dir_label = label or scan.disc_label or "unknown_disc"
+
+    tag = " [user-edited]" if to_rip != list(plan.classification.suggested_titles_to_rip) else ""
+    print(f"\nRipping per plan: {to_rip} (disc_type={disc_type})  [from {out_dir}]{tag}")
+
+    plan = _write_plan_for_scan(scan, cls, plan.disc_id, out_dir, plan)
+
+    mb_metadata = cls.mb_metadata
+    if disc_type == "music":
+        mb_metadata = _pinned_mb_metadata(plan, mb_metadata)
+
+    track_count = _execute_rip(drive, scan, out_dir, disc_type, to_rip, mb_metadata, wipe_existing=True)
+    if track_count is None:
+        return None
+
+    _write_disc_id_meta(out_dir, plan.disc_id, scan.media_type, dir_label, disc_num=1)
 
     return RipResult(
         output_dir=out_dir,
         disc_type=disc_type,
-        media_type=media_type,
+        media_type=scan.media_type,
+        title_count=track_count,
+        disc_id=plan.disc_id,
+        label=dir_label,
+        mb_metadata=mb_metadata,
+    )
+
+
+def _rip_single_pass(
+    drive: int,
+    label: str | None,
+    output: str,
+    output_bd_audio: str,
+    disc_id: str | None = None,
+) -> RipResult | None:
+    """Legacy one-insertion flow: scan, plan, and rip immediately.
+
+    Still honors an existing plan (same dir, user's titles/disc_type), and
+    still writes/refreshes the plan file — it just doesn't stop for review.
+    Also the fallback when no disc_id can be computed (plan skipped).
+    """
+    scan = scan_video_disc(drive)
+    cls = _classify_scan(scan)
+
+    if disc_id is None:
+        device = os.environ.get("DEVICE", "/dev/sr1")
+        disc_id = compute_disc_id(scan.media_type, device)
+
+    disc_type, to_rip, mb_metadata = cls.disc_type, list(cls.to_rip), cls.mb_metadata
+    dir_label = label or scan.disc_label or "unknown_disc"
+
+    existing = find_plan_by_disc_id([output, output_bd_audio], disc_id) if disc_id else None
+    if existing:
+        out_dir = str(existing[0])
+        disc_num = 1
+        prev_plan = existing[1]
+        disc_type = prev_plan.plan.disc_type
+        to_rip = list(prev_plan.plan.titles_to_rip)
+        tag = " [user-edited]" if to_rip != list(prev_plan.classification.suggested_titles_to_rip) else ""
+        print(f"\nUsing existing plan: {to_rip} (disc_type={disc_type})  [from {out_dir}]{tag}")
+    else:
+        prev_plan = None
+        out_dir, disc_num = resolve_output_dir(
+            disc_type=disc_type,
+            media_type=scan.media_type,
+            dir_label=dir_label,
+            disc_label=scan.disc_label,
+            label=label,
+            output=output,
+            output_bd_audio=output_bd_audio,
+        )
+
+    if disc_id:
+        plan = _write_plan_for_scan(scan, cls, disc_id, out_dir, prev_plan)
+        if disc_type == "music":
+            mb_metadata = _pinned_mb_metadata(plan, mb_metadata)
+    else:
+        print("  Plan: skipped (no disc_id)")
+
+    track_count = _execute_rip(drive, scan, out_dir, disc_type, to_rip, mb_metadata, wipe_existing=existing is not None)
+    if track_count is None:
+        return None
+
+    _write_disc_id_meta(out_dir, disc_id, scan.media_type, dir_label, disc_num)
+
+    return RipResult(
+        output_dir=out_dir,
+        disc_type=disc_type,
+        media_type=scan.media_type,
         title_count=track_count,
         disc_id=disc_id,
         label=dir_label,
@@ -659,17 +809,70 @@ def rip_video_disc(
     )
 
 
+def rip_video_disc(
+    drive: int,
+    label: str | None = None,
+    output: str = "/media/archive",
+    output_bd_audio: str = "/output-bd",
+    single_pass: bool = False,
+) -> RipResult | None:
+    """One-call dispatch (rip-video CLI and single-pass fallback).
+
+    Two-pass by default: no plan for this disc → write one and return a
+    `planned=True` result (caller ejects for review); plan exists → validate
+    and rip per plan.  `single_pass=True` restores the legacy
+    scan-and-rip-in-one-insertion behavior; discs that can't be
+    fingerprinted fall back to it automatically.
+
+    Raises PlanValidationError when an existing plan fails validation.
+    """
+    device = os.environ.get("DEVICE", "/dev/sr1")
+    disc_id, _id_type = compute_early_disc_id("unknown", device)
+
+    if single_pass or not disc_id:
+        if not disc_id:
+            print("no disc_id (mount failed?) — falling back to single-pass rip")
+        return _rip_single_pass(drive, label, output, output_bd_audio, disc_id)
+
+    hit = locate_plan([output, output_bd_audio], disc_id)
+    if hit is not None and hit.plan is None:
+        raise PlanValidationError(f"{hit.error}\nFix the JSON (or rm it) and retry.")
+    if hit is None:
+        return plan_video_disc(drive, label, output, output_bd_audio, disc_id=disc_id)
+
+    validate_plan(hit.plan)
+    return rip_planned_video_disc(drive, str(hit.rip_dir), hit.plan, label=label)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Smart video disc ripper")
     parser.add_argument("--drive", type=int, default=0, help="MakeMKV drive ID")
     parser.add_argument("--output", default="/media/archive", help="Archive base directory")
     parser.add_argument("--label", default=None, help="Disc volume label (DRV_LABEL) for directory naming")
-    parser.add_argument("--dry-run", action="store_true", help="Scan and classify only")
+    parser.add_argument(
+        "--plan-only",
+        "--dry-run",
+        action="store_true",
+        dest="plan_only",
+        help="Scan/classify and write the rip plan only (no rip)",
+    )
+    parser.add_argument(
+        "--single-pass",
+        action="store_true",
+        help="Legacy one-insertion flow: scan and rip immediately (no plan review stop)",
+    )
     args = parser.parse_args()
 
-    result = rip_video_disc(args.drive, args.label, args.output, dry_run=args.dry_run)
+    if args.plan_only:
+        result = plan_video_disc(args.drive, args.label, args.output)
+    else:
+        try:
+            result = rip_video_disc(args.drive, args.label, args.output, single_pass=args.single_pass)
+        except PlanValidationError as e:
+            print(f"rip plan invalid:\n{e}")
+            result = None
 
-    if result and not args.dry_run:
+    if result and not result.planned and not args.plan_only:
         # STROPHALOS_* output protocol — backward compatibility
         print(f"STROPHALOS_OUTPUT_DIR={result.output_dir}")
         print(f"STROPHALOS_DISC_TYPE={result.disc_type}")

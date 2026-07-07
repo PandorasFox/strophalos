@@ -17,8 +17,14 @@ from strophalos.daemon.manifest import (
     find_pending_rips,
     write_manifest,
 )
+from strophalos.ripper.plan import PlanHit, PlanValidationError, locate_plan, plan_path, validate_plan
+from strophalos.ripper.planner import compute_early_disc_id
 from strophalos.ripper.probe import ProbeResult, probe_disc
 from strophalos.ripper.result import RipResult
+
+# Probe-level disc types that go through the video rippers (and therefore
+# through the two-pass plan → eject → re-insert → rip flow).
+VIDEO_DISC_TYPES = ("dvd", "bluray", "unknown")
 
 
 class PipelineMode(Enum):
@@ -27,6 +33,27 @@ class PipelineMode(Enum):
     RIP = "rip"
     IDENTIFY = "identify"
     FULL = "full"
+
+
+def decide_video_action(mode: PipelineMode, disc_id: str | None, hit: PlanHit | None) -> str:
+    """Pure dispatch decision for a video disc (unit-testable, no hardware).
+
+    Returns one of:
+      - "reject-invalid": a plan matched the disc_id but can't be loaded —
+        notify and eject, never rip or re-plan (protects the broken plan).
+      - "plan": pass 1 — scan/classify, write the plan, eject.  Chosen when
+        no plan exists yet, and always in SCAN mode (re-plan + refresh).
+      - "single-pass": disc can't be fingerprinted; two-pass impossible, rip
+        in one insertion with classifier defaults (prevents an eject loop).
+      - "rip": pass 2 — a plan exists for this disc; validate and rip per it.
+    """
+    if hit is not None and hit.plan is None:
+        return "reject-invalid"
+    if mode == PipelineMode.SCAN or (disc_id is not None and hit is None):
+        return "plan"
+    if disc_id is None:
+        return "single-pass"
+    return "rip"
 
 
 def _log(msg: str) -> None:
@@ -55,6 +82,7 @@ class Orchestrator:
         pgid: int,
         archive_root: str = "/media/archive",
         library_root: str = "/media",
+        bd_audio_root: str = "/output-bd",
     ) -> None:
         self.device = device
         self.mode = mode
@@ -64,6 +92,7 @@ class Orchestrator:
         self.pgid = pgid
         self.archive_root = Path(archive_root)
         self.library_root = Path(library_root)
+        self.bd_audio_root = Path(bd_audio_root)
         self._last_disc = ""
         self._disc_was_present = False
         self._tick = 0
@@ -123,14 +152,142 @@ class Orchestrator:
             self._finish_disc(probe)
             return
 
+        if probe.disc_type in VIDEO_DISC_TYPES:
+            self._handle_video_disc(probe)
+            return
+
+        # audio / audio+data / data — single-pass, as before
         if self.mode == PipelineMode.SCAN:
             self._run_scan(probe)
             self._finish_disc(probe)
             return
 
-        # RIP or FULL mode
         result = self._run_rip(probe)
+        self._after_rip(probe, result)
 
+    def _handle_video_disc(self, probe: ProbeResult) -> None:
+        """Two-pass flow for DVD/BD/UHD: plan & eject, then rip on re-insert."""
+        disc_id, _id_type = compute_early_disc_id(probe.disc_type, self.device)
+        if disc_id:
+            _log(f"disc_id: {disc_id[:16]}...")
+        hit = locate_plan([self.archive_root, self.bd_audio_root], disc_id) if disc_id else None
+
+        action = decide_video_action(self.mode, disc_id, hit)
+
+        if action == "reject-invalid":
+            assert hit is not None
+            _log(f"invalid plan: {hit.error}")
+            notify(
+                "Rip plan invalid",
+                f"{probe.label}\n{hit.error}\nFix the JSON (or rm it) and re-insert.",
+                error=True,
+                dedup=False,
+            )
+            self._finish_disc(probe, force_eject=True)
+            return
+
+        if action == "plan":
+            self._run_plan_stage(probe, disc_id)
+            self._finish_disc(probe, force_eject=True)
+            return
+
+        if action == "single-pass":
+            _log("no disc_id (unmountable?) — two-pass unavailable, ripping single-pass")
+            result = self._run_rip(probe)
+            self._after_rip(probe, result)
+            return
+
+        # action == "rip" — pass 2
+        assert hit is not None and hit.plan is not None
+        try:
+            validate_plan(hit.plan)
+        except PlanValidationError as e:
+            notify(
+                "Rip plan invalid",
+                f"{probe.label}\n{e}\nFix {plan_path(hit.rip_dir)} and re-insert.",
+                error=True,
+                dedup=False,
+            )
+            self._finish_disc(probe, force_eject=True)
+            return
+
+        try:
+            result = self._run_planned_rip(probe, hit)
+        except PlanValidationError as e:
+            # Stale plan vs disc contents (e.g. titles_to_rip not on disc) —
+            # raised by the rip functions before anything was wiped.
+            notify(
+                "Rip plan doesn't match disc",
+                f"{probe.label}\n{e}\nFix {plan_path(hit.rip_dir)} and re-insert.",
+                error=True,
+                dedup=False,
+            )
+            self._finish_disc(probe, force_eject=True)
+            return
+        self._after_rip(probe, result)
+
+    def _run_plan_stage(self, probe: ProbeResult, disc_id: str | None) -> None:
+        """Pass 1: scan, classify, write the plan + planned manifest. No rip."""
+        if probe.disc_type == "dvd":
+            from strophalos.cli.rip_dvd import plan_dvd_disc
+
+            _log("planning DVD via lsdvd...")
+            result = plan_dvd_disc(self.device, probe.label, str(self.archive_root), disc_id=disc_id)
+        else:
+            from strophalos.cli.rip_video import plan_video_disc
+
+            _log("planning Blu-ray via makemkvcon (this can take a few minutes)...")
+            result = plan_video_disc(
+                0,
+                probe.label,
+                str(self.archive_root),
+                str(self.bd_audio_root),
+                disc_id=disc_id,
+            )
+
+        if result is None:
+            notify("Disc plan failed", probe.label, error=True, dedup=False)
+            return
+
+        self._write_planned_manifest(result)
+        notify(
+            "Plan ready — review & re-insert",
+            f"{probe.label or result.label}\n{plan_path(result.output_dir)}\n"
+            f"{result.title_count} title(s) selected ({result.disc_type}).\n"
+            "Edit plan.titles_to_rip / identify.matches (TMDb/MusicBrainz URLs) "
+            "if needed, then re-insert to rip.",
+            dedup=False,
+        )
+
+    def _run_planned_rip(self, probe: ProbeResult, hit: PlanHit) -> RipResult | None:
+        """Pass 2: rip per the existing plan.  Raises PlanValidationError
+        when the plan doesn't match the disc contents."""
+        assert hit.plan is not None
+        notify("Ripping per plan", f"{probe.label} → {hit.rip_dir}", dedup=False)
+
+        if probe.disc_type == "dvd":
+            from strophalos.cli.rip_dvd import rip_planned_dvd_disc
+
+            result = rip_planned_dvd_disc(self.device, str(hit.rip_dir), hit.plan, label=probe.label)
+        else:
+            from strophalos.cli.rip_video import rip_planned_video_disc
+
+            result = rip_planned_video_disc(0, str(hit.rip_dir), hit.plan, label=probe.label)
+
+        if result is None:
+            notify("Disc rip failed", probe.label, error=True, dedup=False)
+            return None
+
+        self._write_done_manifest(result)
+        notify(
+            "Disc ripped",
+            f"{probe.label} — {result.title_count} title(s), {result.disc_type} ({result.media_type})",
+            dedup=False,
+        )
+        return result
+
+    def _after_rip(self, probe: ProbeResult, result: RipResult | None) -> None:
+        """Common post-rip tail: background identify, hook, finish."""
         if result and self.mode == PipelineMode.FULL:
             # Background identification so next disc isn't blocked
             t = threading.Thread(target=self._run_identify_result, args=(result,), daemon=True)
@@ -148,18 +305,9 @@ class Orchestrator:
         self._finish_disc(probe)
 
     def _run_scan(self, probe: ProbeResult) -> None:
-        """Scan and classify without ripping (dry-run)."""
-        if probe.disc_type == "dvd":
-            from strophalos.cli.rip_dvd import rip_dvd_disc
-
-            _log("scanning DVD via lsdvd...")
-            rip_dvd_disc(self.device, probe.label, str(self.archive_root), dry_run=True)
-        elif probe.disc_type in ("bluray", "unknown"):
-            from strophalos.cli.rip_video import rip_video_disc
-
-            _log("scanning Blu-ray via makemkvcon (this can take a few minutes)...")
-            rip_video_disc(0, probe.label, str(self.archive_root), dry_run=True)
-        elif probe.disc_type in ("data", "audio+data"):
+        """Scan without ripping — non-video types only (video SCAN mode goes
+        through the plan stage in _handle_video_disc)."""
+        if probe.disc_type in ("data", "audio+data"):
             from strophalos.cli.rip_data import rip_data_disc
 
             rip_data_disc(self.device, probe.label, str(self.archive_root) + "/iso", dry_run=True)
@@ -167,7 +315,7 @@ class Orchestrator:
             _log("audio CD — no scan beyond probe")
 
     def _run_rip(self, probe: ProbeResult) -> RipResult | None:
-        """Run the appropriate ripper. Writes manifest before/after."""
+        """Run the appropriate single-pass ripper."""
         if probe.disc_type == "audio":
             return self._rip_audio(probe)
         if probe.disc_type == "audio+data":
@@ -184,7 +332,7 @@ class Orchestrator:
 
         notify("Ripping Blu-ray", probe.label, dedup=False)
 
-        result = rip_video_disc(0, probe.label, str(self.archive_root), dry_run=False)
+        result = rip_video_disc(0, probe.label, str(self.archive_root), str(self.bd_audio_root), single_pass=True)
         if result is None:
             notify("Disc rip failed", probe.label, error=True, dedup=False)
             return None
@@ -203,7 +351,7 @@ class Orchestrator:
 
         notify("Ripping DVD", probe.label, dedup=False)
 
-        result = rip_dvd_disc(self.device, probe.label, str(self.archive_root), dry_run=False)
+        result = rip_dvd_disc(self.device, probe.label, str(self.archive_root), single_pass=True)
         if result is None:
             notify("DVD rip failed", probe.label, error=True, dedup=False)
             return None
@@ -274,6 +422,20 @@ class Orchestrator:
                     os.chown(os.path.join(root, f), self.puid, self.pgid)
         except OSError as e:
             _log(f"chown failed for {path}: {e}")
+
+    def _write_planned_manifest(self, result: RipResult) -> None:
+        """Write a status='planned' manifest next to the freshly-written plan."""
+        out_dir = Path(result.output_dir)
+        manifest = RipManifest(
+            status="planned",
+            label=result.label,
+            disc_type=result.disc_type,
+            media_type=result.media_type,
+            expected_titles=result.title_count,
+            disc_id=result.disc_id,
+        )
+        write_manifest(out_dir, manifest)
+        self._chown_output(out_dir)
 
     def _write_done_manifest(self, result: RipResult) -> None:
         """Chown output to PUID:PGID, then write completed manifest."""
@@ -358,9 +520,12 @@ class Orchestrator:
 
             time.sleep(60)
 
-    def _finish_disc(self, probe: ProbeResult) -> None:
+    def _finish_disc(self, probe: ProbeResult, force_eject: bool = False) -> None:
+        """Wrap up the current disc.  `force_eject` bypasses the
+        eject_on_complete setting — the plan-and-eject pass and plan-error
+        paths must always eject so the user can review/fix and re-insert."""
         self._last_disc = f"{probe.disc_type}:{probe.label}"
-        if self.eject_on_complete:
+        if force_eject or self.eject_on_complete:
             _log("ejecting")
             if not eject_disc(self.device):
                 _log("eject failed")

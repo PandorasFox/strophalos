@@ -1,14 +1,16 @@
 #!/bin/sh
-# Dump or show the per-disc rip plan without ripping.
+# Dump, show, or validate the per-disc rip plan without ripping.
 #
 # Usage:
-#   ./helpers/rip-plan.sh                    — scan disc, write/refresh plan JSON
-#   ./helpers/rip-plan.sh --show DISC_ID     — pretty-print an existing plan
+#   ./helpers/rip-plan.sh                        — scan disc, write/refresh plan JSON
+#   ./helpers/rip-plan.sh --show DISC_ID         — pretty-print an existing plan
 #   ./helpers/rip-plan.sh --show /mnt/.../rip-dir
+#   ./helpers/rip-plan.sh --validate DISC_ID     — check an edited plan before re-insert
 #
-# After a scan, edit the plan file (set "manual_override": true and adjust
-# "titles_to_rip"), then reinsert the disc — the next rip uses the override
-# and re-rips into the same directory.
+# The daemon writes the plan automatically on first insertion and ejects.
+# Edit "titles_to_rip" / "disc_type" / "identify" (URL pins + per-title
+# matches) while the disc is out, then reinsert — the rip follows the plan
+# into the same directory.
 #
 # Env:
 #   STROPHALOS_COMPOSE  directory containing compose.yml (required)

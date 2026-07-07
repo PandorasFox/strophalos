@@ -1,19 +1,20 @@
-"""rip-plan — dump (or show) the per-disc rip plan without ripping.
+"""rip-plan — dump, show, or validate the per-disc rip plan without ripping.
 
-Designed to be run via `docker exec` / `docker compose run` against a
-stopped or idle container:
+The daemon writes a plan automatically on a disc's first insertion and
+ejects; edit the plan while the disc is out, re-insert, and it rips per
+the plan.  This CLI covers the manual sides of that loop (run via
+`docker exec` / `docker compose run`):
 
-  1. `rip-plan --drive 0` — scan the disc, write `.rip-plan.json` into the
-     prospective rip output directory (classifier's choice), print the
-     path.  No rip happens.
-  2. Edit the plan file (adjust `titles_to_rip` / `disc_type` /
-     `identify.tmdb_id`).  No flag to flip — edits to an existing plan
-     are always honored.
-  3. Reinsert the disc and let the daemon re-rip into the same dir.
-     `rm` the plan file to reset to classifier defaults.
-
-`rip-plan --show DISC_ID` walks the archive for an existing plan and
-pretty-prints it without touching the drive.
+  - `rip-plan --drive 0` — scan the disc in the drive and write/refresh
+    `.rip-plan.json` (same as the daemon's first pass; no rip).
+  - Edit the plan: `plan.titles_to_rip` / `plan.disc_type` drive the rip;
+    `identify.url` pins the whole disc to a TMDb/MusicBrainz URL;
+    `identify.matches` maps individual titles to entries by URL
+    (multi-movie discs).  `rm` the file to reset to classifier defaults.
+  - `rip-plan --validate DISC_ID_OR_PATH` — check an edited plan (URL
+    parsing + consistency) before re-inserting the disc.
+  - `rip-plan --show DISC_ID_OR_PATH` — pretty-print an existing plan
+    without touching the drive.
 """
 
 from __future__ import annotations
@@ -23,21 +24,73 @@ import json
 import sys
 from pathlib import Path
 
-from strophalos.cli.rip_video import rip_video_disc
-from strophalos.ripper.plan import find_plan_by_disc_id, plan_path
+from strophalos.cli.rip_video import plan_video_disc
+from strophalos.ripper.plan import (
+    PlanValidationError,
+    find_plan_by_disc_id,
+    parse_provider_url,
+    plan_path,
+    read_plan,
+    validate_plan,
+)
+
+
+def _resolve_plan_file(target: str, archive_root: str, bd_audio_root: str) -> Path | None:
+    """Resolve a disc_id or file/dir path to a plan file path."""
+    p = Path(target)
+    if p.is_dir():
+        p = plan_path(p)
+    if p.exists():
+        return p
+    hit = find_plan_by_disc_id([archive_root, bd_audio_root], target)
+    if hit is None:
+        return None
+    return plan_path(hit[0])
+
+
+def _validate_plan_file(target: str, archive_root: str, bd_audio_root: str) -> int:
+    """Validate an edited plan before re-inserting the disc.  Exit 0/1."""
+    p = _resolve_plan_file(target, archive_root, bd_audio_root)
+    if p is None:
+        print(f"no plan found for disc_id/path: {target}", file=sys.stderr)
+        return 1
+
+    try:
+        json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"INVALID {p}: not parseable JSON ({e})", file=sys.stderr)
+        print("note: a syntactically broken plan can't be matched by disc_id on re-insert", file=sys.stderr)
+        return 1
+
+    plan = read_plan(p.parent)
+    if plan is None:
+        print(f"INVALID {p}: JSON parses but doesn't fit the plan schema", file=sys.stderr)
+        return 1
+
+    try:
+        validate_plan(plan)
+    except PlanValidationError as e:
+        print(f"INVALID {p}:", file=sys.stderr)
+        for line in str(e).splitlines():
+            print(f"  - {line}", file=sys.stderr)
+        return 1
+
+    print(f"OK {p}")
+    print(f"  {plan.plan.disc_type} — titles_to_rip {plan.plan.titles_to_rip}")
+    if plan.identify.url:
+        print(f"  whole-disc pin: {plan.identify.url}")
+    for m in plan.identify.matches:
+        titles = m.titles or "whole disc"
+        print(f"  match: {m.url} → titles {titles}")
+    return 0
 
 
 def _show_plan(target: str, archive_root: str, bd_audio_root: str) -> int:
     """Pretty-print an existing plan.  `target` is a disc_id or a file/dir path."""
-    p = Path(target)
-    if p.is_dir():
-        p = plan_path(p)
-    if not p.exists():
-        hit = find_plan_by_disc_id([archive_root, bd_audio_root], target)
-        if hit is None:
-            print(f"no plan found for disc_id/path: {target}", file=sys.stderr)
-            return 1
-        p = plan_path(hit[0])
+    p = _resolve_plan_file(target, archive_root, bd_audio_root)
+    if p is None:
+        print(f"no plan found for disc_id/path: {target}", file=sys.stderr)
+        return 1
 
     try:
         data = json.loads(p.read_text())
@@ -68,6 +121,12 @@ def _show_plan(target: str, archive_root: str, bd_audio_root: str) -> int:
         season = f" season={ident['season']}" if ident.get("season") is not None else ""
         ident_note = f"  ({ident['note']})" if ident.get("note") else ""
         print(f"  identify:   tmdb_id={ident['tmdb_id']} type={ident.get('tmdb_type')}{season}{ident_note}")
+    if ident.get("url"):
+        print(f"  identify:   url={ident['url']}{_parsed_suffix(ident['url'])}")
+    for m in ident.get("matches") or []:
+        titles = m.get("titles") or "whole disc"
+        m_note = f"  ({m['note']})" if m.get("note") else ""
+        print(f"  match:      {m.get('url')}{_parsed_suffix(m.get('url', ''))} → titles {titles}{m_note}")
     print()
     print("  Titles:")
     for t in data.get("titles", []):
@@ -77,6 +136,16 @@ def _show_plan(target: str, archive_root: str, bd_audio_root: str) -> int:
         src = f"  src={t['source_filename']}" if t.get("source_filename") else ""
         print(f"    Title {t['tid']:2d}: {t['duration']}  ({t.get('chapters', '?')} chapters{sz}){src}{seg}{drop}")
     return 0
+
+
+def _parsed_suffix(url: str) -> str:
+    """' [tmdb movie 603]'-style annotation for a provider URL, or ' [UNPARSEABLE]'."""
+    try:
+        p = parse_provider_url(url)
+    except PlanValidationError:
+        return "  [UNPARSEABLE]"
+    season = f" season {p.season}" if p.season is not None else ""
+    return f"  [{p.provider} {p.kind} {p.id}{season}]"
 
 
 def main() -> int:
@@ -101,18 +170,23 @@ def main() -> int:
         metavar="DISC_ID_OR_PATH",
         help="Pretty-print an existing plan (walks archive if given a disc_id)",
     )
+    parser.add_argument(
+        "--validate",
+        metavar="DISC_ID_OR_PATH",
+        help="Validate an edited plan (URLs + consistency) before re-inserting the disc",
+    )
     args = parser.parse_args()
+
+    if args.validate:
+        return _validate_plan_file(args.validate, args.output, args.output_bd_audio)
 
     if args.show:
         return _show_plan(args.show, args.output, args.output_bd_audio)
 
-    result = rip_video_disc(args.drive, args.label, args.output, dry_run=True)
+    result = plan_video_disc(args.drive, args.label, args.output, args.output_bd_audio)
     if result is None:
-        print("scan/classify failed", file=sys.stderr)
+        print("scan/classify failed or no disc_id computed — plan was NOT written", file=sys.stderr)
         return 1
-    if not result.disc_id:
-        print("no disc_id computed (mount failed?) — plan was NOT written", file=sys.stderr)
-        return 2
     print(f"\nPlan written: {plan_path(result.output_dir)}")
     return 0
 

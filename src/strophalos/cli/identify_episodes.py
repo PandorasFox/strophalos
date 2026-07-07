@@ -28,8 +28,46 @@ from strophalos.core.notify import notify
 from strophalos.daemon.manifest import settle_identify, write_conflict
 from strophalos.identify.assignment import assign_episodes, build_double_episode_window, find_best_window
 from strophalos.identify.subtitles import extract_subtitles
-from strophalos.ripper.plan import read_plan
+from strophalos.ripper.plan import (
+    ParsedUrl,
+    PlanValidationError,
+    RipPlan,
+    effective_pin,
+    parse_provider_url,
+    read_plan,
+)
 from strophalos.types import Episode, MatchResult, RippedFile
+
+
+def _series_pin(plan: RipPlan) -> ParsedUrl | None:
+    """Resolve the plan's TV-series pin.
+
+    The whole-disc pin (identify.url or legacy tmdb_id/tmdb_type="tv") wins.
+    Failing that, a single tv-kind entry in identify.matches counts as the
+    pin; multiple tv matches are ambiguous (per-episode mapping isn't
+    supported) and are ignored with a warning.
+    """
+    try:
+        pin = effective_pin(plan.identify)
+    except PlanValidationError as e:
+        print(f"  plan identify pin invalid ({e}); ignoring")
+        pin = None
+    if pin is not None:
+        return pin if pin.provider == "tmdb" and pin.kind == "tv" else None
+
+    tv_matches: list[ParsedUrl] = []
+    for m in plan.identify.matches:
+        try:
+            parsed = parse_provider_url(m.url)
+        except PlanValidationError:
+            continue
+        if parsed.kind == "tv":
+            tv_matches.append(parsed)
+    if len(tv_matches) == 1:
+        return tv_matches[0]
+    if len(tv_matches) > 1:
+        print("  plan has multiple tv matches — per-episode mapping isn't supported; ignoring them")
+    return None
 
 
 def _format_ranges(match_results: list[MatchResult]) -> str:
@@ -102,12 +140,14 @@ def main() -> None:
 
     plan = read_plan(out_dir)
     pin_series_id: int | None = None
-    if plan is not None and plan.identify.tmdb_id and plan.identify.tmdb_type == "tv":
-        pin_series_id = plan.identify.tmdb_id
-        print(f"  TMDb: pinned series id={pin_series_id} from .rip-plan.json")
-        if plan.identify.season is not None:
-            label_season = plan.identify.season
-            print(f"  TMDb: pinned season={label_season} from .rip-plan.json")
+    if plan is not None:
+        pin = _series_pin(plan)
+        if pin is not None:
+            pin_series_id = int(pin.id)
+            print(f"  TMDb: pinned series id={pin_series_id} from .rip-plan.json")
+            if pin.season is not None:
+                label_season = pin.season
+                print(f"  TMDb: pinned season={label_season} from .rip-plan.json")
 
     # Build RippedFile objects with durations
     files: list[RippedFile] = []

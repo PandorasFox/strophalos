@@ -8,11 +8,12 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from strophalos.backends.musicbrainz import search_release
+from strophalos.backends.musicbrainz import get_release_by_id, search_release
 from strophalos.core.fs import sanitize_filename
 from strophalos.core.mkv import get_mkv_duration
 from strophalos.core.notify import notify
 from strophalos.daemon.manifest import write_conflict
+from strophalos.ripper.plan import pinned_release_id, read_plan
 
 
 def main() -> None:
@@ -44,9 +45,21 @@ def main() -> None:
         file_durs.append((mkv, dur))
         print(f"  {mkv.name}: {dur:.0f}s")
 
-    # Search MusicBrainz
-    durations = [d for _, d in file_durs]
-    release = search_release(args.label, durations)
+    # Pinned release from the rip plan (identify.url / a release match) wins
+    # over label search.
+    release = None
+    plan = read_plan(disc_dir)
+    if plan is not None:
+        release_id = pinned_release_id(plan.identify)
+        if release_id:
+            print(f"  MusicBrainz: using release pinned in .rip-plan.json: {release_id}")
+            release = get_release_by_id(release_id)
+            if release is None:
+                print("  MusicBrainz: pinned release did not resolve; falling back to search")
+
+    if release is None:
+        durations = [d for _, d in file_durs]
+        release = search_release(args.label, durations)
 
     if not release:
         clean = args.label.replace("_", " ")

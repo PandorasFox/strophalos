@@ -14,7 +14,15 @@ from strophalos.core.fs import sanitize_filename
 from strophalos.core.mkv import get_mkv_duration
 from strophalos.core.notify import notify
 from strophalos.daemon.manifest import settle_identify, write_conflict
-from strophalos.ripper.plan import read_plan
+from strophalos.ripper.plan import (
+    ParsedUrl,
+    PlanValidationError,
+    RipPlan,
+    TitleMatch,
+    effective_pin,
+    parse_provider_url,
+    read_plan,
+)
 
 # Tokens that carry no identifying signal — they show up in catalog codes,
 # generic placeholder titles ("title_t00.mkv" → "title"), and edition
@@ -126,6 +134,231 @@ def _link_as_unidentified(
     )
 
 
+def _link_movie(
+    disc_dir: Path,
+    library: Path,
+    movie: dict,
+    main_feature: Path,
+    extras: list[Path],
+    *,
+    dry_run: bool,
+) -> dict:
+    """Hard-link one movie (main feature + its extras) into the library.
+
+    Returns a manifest entry: {title, year, tmdb_id, main_feature, extras,
+    folder, status} with status "linked" | "already-linked" | "conflict".
+    Conflict markers and notifications are emitted here; manifest writing
+    and settle_identify are the caller's job.
+    """
+    title = movie.get("title", "")
+    year = movie.get("release_date", "")[:4]
+    title_safe = sanitize_filename(title)
+    folder_name = f"{title_safe} ({year})" if year else title_safe
+
+    movie_dir = library / "movies" / folder_name
+    link_name = f"{title_safe}.mkv"
+    link_path = movie_dir / link_name
+
+    entry = {
+        "title": title,
+        "year": year,
+        "tmdb_id": movie.get("id"),
+        "main_feature": main_feature.name,
+        "extras": [e.name for e in extras],
+        "folder": folder_name,
+        "status": "linked",
+    }
+
+    if link_path.exists():
+        existing_inode = link_path.stat().st_ino
+        if existing_inode == main_feature.stat().st_ino:
+            print(f"  Already linked (same file): {link_path}")
+            entry["status"] = "already-linked"
+            return entry
+
+        # Check if this is an alternate cut (different duration → extended/theatrical)
+        existing_duration = get_mkv_duration(link_path)
+        new_duration = get_mkv_duration(main_feature)
+        duration_diff_min = abs(new_duration - existing_duration) / 60 if (existing_duration and new_duration) else 0
+
+        if duration_diff_min > 8:
+            # Durations differ enough to be a different cut — suffix the longer one
+            suffix = "Extended Cut" if new_duration > existing_duration else "Alternate Cut"
+            link_name = f"{title_safe} - {suffix}.mkv"
+            link_path = movie_dir / link_name
+            print(f"  Detected alternate cut ({duration_diff_min:.0f}m difference) → {suffix}")
+            if link_path.exists():
+                if link_path.stat().st_ino == main_feature.stat().st_ino:
+                    print(f"  Already linked (same file): {link_path}")
+                    entry["status"] = "already-linked"
+                    return entry
+                # Alternate cut path also taken — true conflict
+                write_conflict(disc_dir, [{"library_path": str(link_path), "inode": link_path.stat().st_ino}])
+                notify(
+                    f"{title} ({suffix}): link conflict",
+                    f"Library already has a different copy:\n{link_path}\n\nNew rip: {main_feature}\nResolve manually.",
+                    error=True,
+                )
+                entry["status"] = "conflict"
+                return entry
+        else:
+            print(f"  Conflict: {link_path} exists with different inode")
+            write_conflict(disc_dir, [{"library_path": str(link_path), "inode": existing_inode}])
+            notify(
+                f"{title}: link conflict",
+                f"Library already has a different copy:\n{link_path}\n\nNew rip: {main_feature}\nResolve manually.",
+                error=True,
+            )
+            entry["status"] = "conflict"
+            return entry
+
+    action = "would link" if dry_run else "link"
+    print(f"  {action}: {main_feature.name} → movies/{folder_name}/{link_name}")
+
+    if not dry_run:
+        movie_dir.mkdir(parents=True, exist_ok=True)
+        os.link(main_feature, link_path)
+
+    # Link extras too
+    for i, extra in enumerate(extras):
+        extra_size = extra.stat().st_size / (1024**3)
+        extra_name = f"{title_safe} - Extra {i + 1}.mkv"
+        extra_path = movie_dir / extra_name
+        if not extra_path.exists():
+            print(f"  {action}: {extra.name} → movies/{folder_name}/{extra_name} ({extra_size:.1f} GB)")
+            if not dry_run:
+                os.link(extra, extra_path)
+
+    return entry
+
+
+def _write_movie_manifest(disc_dir: Path, entries: list[dict], unmatched: list[str]) -> None:
+    """Write .movie-manifest.json (v2 — multi-movie aware).
+
+    Top-level legacy fields mirror the first movie so older readers keep
+    working; the identify loop only checks the file's existence.
+    """
+    manifest: dict = {
+        "movies": [{k: v for k, v in e.items() if k != "status"} for e in entries],
+        "unmatched": unmatched,
+        "timestamp": datetime.now().isoformat(),
+    }
+    if entries:
+        first = entries[0]
+        manifest.update(
+            {
+                "title": first["title"],
+                "year": first["year"],
+                "tmdb_id": first["tmdb_id"],
+                "main_feature": first["main_feature"],
+                "extras": first["extras"],
+            }
+        )
+    manifest_path = disc_dir / ".movie-manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    print(f"  Manifest written: {manifest_path}")
+
+
+def _movie_matches(plan: RipPlan) -> list[tuple[TitleMatch, ParsedUrl]]:
+    """The plan's parseable movie-kind identify matches."""
+    out: list[tuple[TitleMatch, ParsedUrl]] = []
+    for m in plan.identify.matches:
+        try:
+            parsed = parse_provider_url(m.url)
+        except PlanValidationError as e:
+            print(f"  plan match skipped: {e}")
+            continue
+        if parsed.kind == "movie":
+            out.append((m, parsed))
+        else:
+            print(f"  plan match {m.url}: kind={parsed.kind} — not handled by identify-movie")
+    return out
+
+
+def _identify_by_matches(
+    disc_dir: Path,
+    library: Path,
+    label: str,
+    matches: list[tuple[TitleMatch, ParsedUrl]],
+    mkv_files: list[Path],
+    *,
+    dry_run: bool,
+) -> None:
+    """Per-title identification from `identify.matches` (multi-movie discs).
+
+    Each match maps title id(s) to one TMDb movie: the first tid is the
+    main feature, the rest are that movie's extras.  Pinned IDs bypass the
+    token-overlap plausibility gate — the user explicitly chose them.
+    """
+    print(f"  Plan: {len(matches)} per-title movie match(es) from .rip-plan.json")
+
+    tid_to_file: dict[int, Path] = {}
+    for f in mkv_files:
+        m = re.search(r"_t(\d{2})\.mkv$", f.name)
+        if m:
+            tid_to_file[int(m.group(1))] = f
+
+    entries: list[dict] = []
+    matched_files: set[Path] = set()
+    problems: list[str] = []
+
+    for match, parsed in matches:
+        files = [tid_to_file[t] for t in match.titles if t in tid_to_file]
+        missing = [t for t in match.titles if t not in tid_to_file]
+        if missing or not files:
+            msg = f"{match.url}: title(s) {missing or match.titles} not found on disk"
+            print(f"  skip — {msg}")
+            problems.append(msg)
+            continue
+
+        movie = fetch_movie_by_id(int(parsed.id))
+        if not movie:
+            msg = f"{match.url}: TMDb id {parsed.id} did not resolve"
+            print(f"  skip — {msg}")
+            problems.append(msg)
+            continue
+
+        print(f"  Match: titles {match.titles} → {movie.get('title')} ({movie.get('release_date', '')[:4]})")
+        entry = _link_movie(disc_dir, library, movie, files[0], files[1:], dry_run=dry_run)
+        entries.append(entry)
+        matched_files.update(files)
+        if entry["status"] == "conflict":
+            problems.append(f"{entry['title']}: link conflict")
+
+    unmatched = [f.name for f in mkv_files if f not in matched_files]
+    if unmatched:
+        print(f"  Unmatched MKV(s) left in archive: {', '.join(unmatched)}")
+
+    if dry_run:
+        return
+
+    linked = [e for e in entries if e["status"] in ("linked", "already-linked")]
+    if linked:
+        _write_movie_manifest(disc_dir, entries, unmatched)
+
+    titles_summary = ", ".join(f"{e['title']} ({e['year']})" for e in entries) or "none"
+    if problems:
+        settle_identify(
+            disc_dir,
+            status="partial",
+            summary=f"linked: {titles_summary}; problems: {'; '.join(problems)}",
+            notify_title=f"{label}: identified {len(linked)}/{len(matches)} movie(s)",
+            notify_body=f"Linked: {titles_summary}\nProblems:\n- " + "\n- ".join(problems),
+            notify_error=True,
+        )
+    else:
+        body = titles_summary
+        if unmatched:
+            body += f"\nUnmatched (left in archive): {', '.join(unmatched)}"
+        settle_identify(
+            disc_dir,
+            status="success",
+            summary=f"{titles_summary} linked",
+            notify_title=f"{label}: {len(linked)} movie(s) linked to library",
+            notify_body=body,
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Movie identification — hard-link to library")
     parser.add_argument("--dir", required=True, help="Archive disc directory")
@@ -148,12 +381,21 @@ def main() -> None:
 
     print(f"Found {len(mkv_files)} MKV file(s)")
 
+    plan = read_plan(disc_dir)
+
+    # Per-title matches (dual features, multi-movie collections): the plan
+    # maps titles to TMDb entries explicitly — no search, no main-title guess.
+    if plan is not None and plan.identify.matches:
+        matches = _movie_matches(plan)
+        if matches:
+            _identify_by_matches(disc_dir, library, args.label, matches, mkv_files, dry_run=args.dry_run)
+            return
+
     # Plan-aware main-feature selection: when the disc was ripped with
     # STROPHALOS_RIP_ALL_TITLES (or a manual override that pulled in extras),
     # the largest file isn't reliably the main feature.  The classifier's
     # own main-title pick lives in the rip plan — prefer that, fall back to
     # largest when no plan exists or the suggested title isn't on disk.
-    plan = read_plan(disc_dir)
     main_feature: Path | None = None
     plan_note = ""
     if plan is not None:
@@ -194,13 +436,19 @@ def main() -> None:
     movie: dict | None = None
     winning_query: str | None = None
     pinned = False
-    if plan is not None and plan.identify.tmdb_id and plan.identify.tmdb_type == "movie":
-        print(f"  TMDb: using pinned override id={plan.identify.tmdb_id} from .rip-plan.json")
-        movie = fetch_movie_by_id(plan.identify.tmdb_id)
+    pin = None
+    if plan is not None:
+        try:
+            pin = effective_pin(plan.identify)
+        except PlanValidationError as e:
+            print(f"  plan identify pin invalid ({e}); falling back to search")
+    if pin is not None and pin.provider == "tmdb" and pin.kind == "movie":
+        print(f"  TMDb: using pinned override id={pin.id} from .rip-plan.json")
+        movie = fetch_movie_by_id(int(pin.id))
         if movie:
             pinned = True
         else:
-            print(f"  TMDb override id={plan.identify.tmdb_id} did not resolve; falling back to search")
+            print(f"  TMDb override id={pin.id} did not resolve; falling back to search")
 
     if movie is None:
         match = search_movie(args.label, duration_seconds=duration, mkv_title=main_feature.stem)
@@ -243,87 +491,14 @@ def main() -> None:
             dry_run=args.dry_run,
         )
         return
-    title_safe = sanitize_filename(title)
-    folder_name = f"{title_safe} ({year})" if year else title_safe
-
-    # Library path
-    movie_dir = library / "movies" / folder_name
-    link_name = f"{title_safe}.mkv"
-    link_path = movie_dir / link_name
-
-    if link_path.exists():
-        existing_inode = link_path.stat().st_ino
-        new_inode = main_feature.stat().st_ino
-        if existing_inode == new_inode:
-            print(f"  Already linked (same file): {link_path}")
-            return
-
-        # Check if this is an alternate cut (different duration → extended/theatrical)
-        existing_duration = get_mkv_duration(link_path)
-        new_duration = duration or get_mkv_duration(main_feature)
-        duration_diff_min = abs(new_duration - existing_duration) / 60 if (existing_duration and new_duration) else 0
-
-        if duration_diff_min > 8:
-            # Durations differ enough to be a different cut — suffix the longer one
-            if new_duration > existing_duration:
-                suffix = "Extended Cut"
-            else:
-                suffix = "Alternate Cut"
-            link_name = f"{title_safe} - {suffix}.mkv"
-            link_path = movie_dir / link_name
-            print(f"  Detected alternate cut ({duration_diff_min:.0f}m difference) → {suffix}")
-            if link_path.exists():
-                if link_path.stat().st_ino == main_feature.stat().st_ino:
-                    print(f"  Already linked (same file): {link_path}")
-                    return
-                # Alternate cut path also taken — true conflict
-                write_conflict(disc_dir, [{"library_path": str(link_path), "inode": link_path.stat().st_ino}])
-                notify(
-                    f"{title} ({suffix}): link conflict",
-                    f"Library already has a different copy:\n{link_path}\n\nNew rip: {main_feature}\nResolve manually.",
-                    error=True,
-                )
-                return
-        else:
-            print(f"  Conflict: {link_path} exists with different inode")
-            write_conflict(disc_dir, [{"library_path": str(link_path), "inode": existing_inode}])
-            notify(
-                f"{title}: link conflict",
-                f"Library already has a different copy:\n{link_path}\n\nNew rip: {main_feature}\nResolve manually.",
-                error=True,
-            )
-            return
-
-    action = "would link" if args.dry_run else "link"
-    print(f"  {action}: {main_feature.name} → movies/{folder_name}/{link_name}")
+    entry = _link_movie(disc_dir, library, movie, main_feature, extras, dry_run=args.dry_run)
+    if entry["status"] != "linked":
+        # already-linked: a prior run settled this rip; conflict: marker +
+        # notification were emitted by _link_movie.
+        return
 
     if not args.dry_run:
-        movie_dir.mkdir(parents=True, exist_ok=True)
-        os.link(main_feature, link_path)
-
-    # Link extras too
-    for i, extra in enumerate(extras):
-        extra_size = extra.stat().st_size / (1024**3)
-        extra_name = f"{title_safe} - Extra {i + 1}.mkv"
-        extra_path = movie_dir / extra_name
-        if not extra_path.exists():
-            print(f"  {action}: {extra.name} → movies/{folder_name}/{extra_name} ({extra_size:.1f} GB)")
-            if not args.dry_run:
-                os.link(extra, extra_path)
-
-    # Manifest
-    if not args.dry_run:
-        manifest = {
-            "title": title,
-            "year": year,
-            "tmdb_id": movie.get("id"),
-            "main_feature": main_feature.name,
-            "extras": [e.name for e in extras],
-            "timestamp": datetime.now().isoformat(),
-        }
-        manifest_path = disc_dir / ".movie-manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2))
-        print(f"  Manifest written: {manifest_path}")
+        _write_movie_manifest(disc_dir, [entry], [])
 
     body = f"{title} ({year})\n{main_size_gb:.1f} GB main feature"
     if extras:
@@ -335,7 +510,7 @@ def main() -> None:
         notify_title=f"{title}: linked to library",
         notify_body=body,
     )
-    print(f"Done: {folder_name}")
+    print(f"Done: {entry['folder']}")
 
 
 if __name__ == "__main__":
