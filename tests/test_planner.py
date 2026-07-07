@@ -27,11 +27,21 @@ class TestResolveOutputDir:
         assert out_dir == str(tmp_path / "movies" / "rips" / "bd" / "TMNT_COLLECTION" / "disc1")
         assert disc_num == 1
 
-    def test_disc_number_bumps(self, tmp_path: Path):
-        (tmp_path / "movies" / "rips" / "bd" / "X" / "disc1").mkdir(parents=True)
+    def test_disc_number_bumps_past_nonempty(self, tmp_path: Path):
+        d1 = tmp_path / "movies" / "rips" / "bd" / "X" / "disc1"
+        d1.mkdir(parents=True)
+        (d1 / ".rip-plan.json").write_text("{}")
         out_dir, disc_num = resolve_output_dir(disc_type="movie", media_type="bd", dir_label="X", output=str(tmp_path))
         assert out_dir.endswith("disc2")
         assert disc_num == 2
+
+    def test_empty_leftover_disc_dir_reused(self, tmp_path: Path):
+        # An aborted attempt (e.g. no disc_id, rip failed before any output)
+        # leaves an empty discN — reuse it instead of bumping.
+        (tmp_path / "movies" / "rips" / "bd" / "X" / "disc1").mkdir(parents=True)
+        out_dir, disc_num = resolve_output_dir(disc_type="movie", media_type="bd", dir_label="X", output=str(tmp_path))
+        assert out_dir.endswith("disc1")
+        assert disc_num == 1
 
     def test_music_goes_to_bd_audio_root(self, tmp_path: Path):
         bd_audio = tmp_path / "output-bd"

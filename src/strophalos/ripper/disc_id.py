@@ -40,32 +40,29 @@ def _unmount_disc(mount_point: str) -> None:
 
 
 def compute_dvd_disc_id(device: str) -> str | None:
-    """Compute the standard DVD disc ID (CRC64 from VIDEO_TS IFO files).
+    """Compute the standard DVD disc ID (CRC64 from VIDEO_TS metadata).
 
-    Uses the same algorithm as Windows IDvdInfo2::GetDiscID — compatible with
-    pydvdid/dvdid databases. Requires mounting the disc to read IFO files.
+    Uses the same algorithm as Windows IDvdInfo2::GetDiscID — compatible
+    with pydvdid/dvdid databases.  pydvdid-m parses the ISO 9660 structures
+    directly from the block device (or an ISO path), so no mount is needed.
+    The device path MUST be handed to DvdId as-is: a mounted-directory path
+    takes DvdId's extracted-folder branch, which blocks on interactive
+    input() — fatal in the daemon.
     """
     try:
-        from pydvdid_m import compute
+        from pydvdid_m import DvdId
     except ImportError:
         print("  DVD disc ID: pydvdid-m not installed, skipping")
         return None
 
-    mount_point = _mount_disc_readonly(device)
-    if not mount_point:
-        print("  DVD disc ID: could not mount disc")
-        return None
-
     try:
-        disc_id = compute(mount_point)
-        result = str(disc_id).lower()
+        disc_id = DvdId(device)
+        result = str(disc_id.checksum).lower()
         print(f"  DVD disc ID: {result}")
         return result
     except Exception as e:
         print(f"  DVD disc ID: computation failed: {e}")
         return None
-    finally:
-        _unmount_disc(mount_point)
 
 
 def compute_bd_disc_id(device: str) -> str | None:

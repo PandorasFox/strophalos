@@ -93,11 +93,7 @@ def resolve_output_dir(
         box_set = parse_season_disc(disc_label or "") or parse_season_disc(label or "")
 
     if disc_type == "music" and output_bd_audio:
-        label_dir = os.path.join(output_bd_audio, dir_label)
-        disc_num = 1
-        while os.path.exists(os.path.join(label_dir, f"disc{disc_num}")):
-            disc_num += 1
-        return os.path.join(label_dir, f"disc{disc_num}"), disc_num
+        return _next_disc_dir(os.path.join(output_bd_audio, dir_label))
 
     if box_set:
         series_pretty, season_n, disc_n = box_set
@@ -114,10 +110,25 @@ def resolve_output_dir(
 
     content_type = {"tv": "tv", "music": "music"}.get(disc_type, "movies")
     label_dir = os.path.join(output, content_type, "rips", media_type, dir_label)
+    return _next_disc_dir(label_dir)
+
+
+def _next_disc_dir(label_dir: str) -> tuple[str, int]:
+    """First discN under label_dir that is absent OR an empty leftover dir.
+
+    Empty dirs happen when a previous attempt got as far as creating the
+    output dir but produced nothing (e.g. aborted before the plan was
+    written) — reuse them instead of bumping to discN+1.  Anything with
+    content (a plan, a manifest, MKVs) is a real disc and bumps.
+    """
     disc_num = 1
-    while os.path.exists(os.path.join(label_dir, f"disc{disc_num}")):
+    while True:
+        out_dir = os.path.join(label_dir, f"disc{disc_num}")
+        if not os.path.exists(out_dir):
+            return out_dir, disc_num
+        if os.path.isdir(out_dir) and not any(os.scandir(out_dir)):
+            return out_dir, disc_num
         disc_num += 1
-    return os.path.join(label_dir, f"disc{disc_num}"), disc_num
 
 
 def seed_or_refresh_plan(
