@@ -11,10 +11,20 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from strophalos.core.notify import notify
 from strophalos.ripper.cdtoc import read_full_toc
+
+# whipper gives up on a track after N rip attempts whose cdparanoia
+# checksums never converge — the signature of a dirty/scratched disc.
+_GIVE_UP_RE = re.compile(r"giving up on track (\d+) after")
+
+
+def _checksum_failed_tracks(log_lines: list[str]) -> list[int]:
+    """Track numbers whipper gave up on (repeated checksum mismatches)."""
+    return sorted({int(m.group(1)) for line in log_lines if (m := _GIVE_UP_RE.search(line))})
 
 
 def _query_disc_info(device: str) -> dict:
@@ -162,8 +172,15 @@ def rip_audio_cd(device: str, output: str = "/output-cd") -> tuple[int, str]:
     ]
     if release_id:
         cmd += ["-R", release_id]
-    result = subprocess.run(cmd)
-    rc = result.returncode
+    # Tee whipper's stderr (its logging stream) so rip-failure modes can be
+    # classified from the log afterwards; stdout passes through untouched.
+    whipper_log: list[str] = []
+    proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True)
+    assert proc.stderr is not None
+    for line in proc.stderr:
+        sys.stderr.write(line)
+        whipper_log.append(line)
+    rc = proc.wait()
 
     # Post-rip: flatten multi-disc directories
     if disc_total > 1:
@@ -194,19 +211,32 @@ def rip_audio_cd(device: str, output: str = "/output-cd") -> tuple[int, str]:
 
         notify("CD ripped", "\n".join(lines), dedup=False)
     elif rc != 0:
-        # Build the submission/attach URL from discid TOC data
-        submission_url = info.get("submission_url", "")
-        if submission_url:
-            import re as _re
-
-            attach_url = _re.sub(r"https?://[^/]+", "https://musicbrainz.org", submission_url)
+        disc_name = f"{artist or 'Unknown'} - {title or 'Unknown'}"
+        failed_tracks = _checksum_failed_tracks(whipper_log)
+        if failed_tracks:
+            # Read errors, not a metadata problem — the TOC attach URL would
+            # just be noise here.
+            tracks_str = ", ".join(str(t) for t in failed_tracks)
+            plural = "s" if len(failed_tracks) > 1 else ""
+            notify(
+                "CD rip failed — track checksum failure",
+                f"{disc_name}\nTrack{plural} {tracks_str}: checksums never converged "
+                "after repeated reads.\nClean the disc and re-insert to retry.",
+                error=True,
+                dedup=False,
+            )
         else:
-            attach_url = ""
+            # Build the submission/attach URL from discid TOC data
+            submission_url = info.get("submission_url", "")
+            if submission_url:
+                attach_url = re.sub(r"https?://[^/]+", "https://musicbrainz.org", submission_url)
+            else:
+                attach_url = ""
 
-        msg = f"{artist or 'Unknown'} - {title or 'Unknown'} (exit {rc})"
-        if attach_url:
-            msg += f"\n\nSubmit/attach TOC:\n{attach_url}"
-        notify("CD rip failed", msg, error=True, dedup=False)
+            msg = f"{disc_name} (exit {rc})"
+            if attach_url:
+                msg += f"\n\nSubmit/attach TOC:\n{attach_url}"
+            notify("CD rip failed", msg, error=True, dedup=False)
 
     return rc, (output if rc == 0 else "")
 
