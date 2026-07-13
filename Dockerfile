@@ -2,7 +2,7 @@
 # Debian base, makemkv built from source, whipper for audio CDs.
 # No GUI — just rips.
 
-ARG MAKEMKV_VERSION=1.18.3
+ARG MAKEMKV_VERSION=1.18.4
 ARG LIBDVDCSS_VERSION=1.4.3
 
 # --- Build stage: makemkv + libdvdcss ---
